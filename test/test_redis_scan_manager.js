@@ -3,7 +3,7 @@ import { RedisScanManager } from "../dist/index.js";
 
 const config = {
   host: "localhost",
-  port: 6379,
+  port: 6379
 };
 
 /**
@@ -35,7 +35,7 @@ async function testWriteData(manager, dataPrefix, writeCount) {
       const value = JSON.stringify({
         id,
         name: `User ${id}`,
-        timestamp: Date.now(),
+        timestamp: Date.now()
       });
       batchPromises.push(manager.add(key, value));
     }
@@ -43,7 +43,9 @@ async function testWriteData(manager, dataPrefix, writeCount) {
 
     const batchDuration = Date.now() - batchStartTime;
     if (i % 100000 === 0) {
-      console.log(`  Batch ${i / BATCH_SIZE}: ${batchDuration}ms for ${BATCH_SIZE} items`);
+      console.log(
+        `  Batch ${i / BATCH_SIZE}: ${batchDuration}ms for ${BATCH_SIZE} items`
+      );
     }
   }
 
@@ -148,7 +150,7 @@ async function testPartialDeleteAndRewrite(manager, dataPrefix, totalCount) {
   const remainingCount = await manager.count(dataPrefix);
   const expectedRemaining = totalCount - deleteCount;
   console.log(
-    `Remaining count: ${remainingCount}, Expected: ${expectedRemaining}`,
+    `Remaining count: ${remainingCount}, Expected: ${expectedRemaining}`
   );
 
   if (remainingCount === expectedRemaining) {
@@ -167,7 +169,7 @@ async function testPartialDeleteAndRewrite(manager, dataPrefix, totalCount) {
     const value = JSON.stringify({
       id,
       name: `New User ${id}`,
-      timestamp: Date.now(),
+      timestamp: Date.now()
     });
     newItems.push({ key, value });
   }
@@ -286,7 +288,7 @@ async function runTest() {
     retryStrategy: times => {
       if (times > 3) return null; // Stop retrying after 3 attempts
       return Math.min(times * 100, 2000);
-    },
+    }
   };
 
   if (Array.isArray(config)) {
@@ -296,7 +298,7 @@ async function runTest() {
       clusterRetryStrategy: times => {
         if (times > 3) return null;
         return Math.min(times * 100, 2000);
-      },
+      }
     });
   } else {
     console.log("Config is an object, initializing Redis Standalone...");
@@ -333,7 +335,7 @@ async function runTest() {
     const manager = new RedisScanManager({
       redis: redis,
       indexPrefix: "test_idx:", // Use a test prefix for index
-      hashChars: 2,
+      hashChars: 2
     });
 
     const DATA_PREFIX = "test_user:";

@@ -127,7 +127,7 @@ export class RedisScanManager {
           lua: `
           redis.call('SET', KEYS[1], ARGV[1])
           redis.call('ZADD', KEYS[2], 0, KEYS[1])
-        `,
+        `
         });
       }
 
@@ -138,7 +138,7 @@ export class RedisScanManager {
             redis.call('DEL', KEYS[i])
             redis.call('ZREM', KEYS[i+1], KEYS[i])
           end
-        `,
+        `
         });
       }
     }
@@ -224,9 +224,9 @@ export class RedisScanManager {
    * @param {Function} fallbackFn - 降级 Pipeline 构建函数
    */
   private async _execAtomic(
-    scriptName: string, 
-    keys: string[], 
-    args: string[], 
+    scriptName: string,
+    keys: string[],
+    args: string[],
     fallbackFn: (pipeline: ChainableCommander) => void
   ) {
     await this._ensureConnection();
@@ -250,7 +250,7 @@ export class RedisScanManager {
    * @returns {Object} pipeline 对象
    */
   private _buildBatchPipeline(
-    bucketBatch: string[], 
+    bucketBatch: string[],
     callback: (pipeline: ChainableCommander, bucketKey: string) => void
   ) {
     const pipeline = this.redis.pipeline();
@@ -273,7 +273,7 @@ export class RedisScanManager {
    */
   async add(key: string, value: string) {
     const bucketKey = this._getBucketKey(key);
-    
+
     if (this.isCluster) {
       // Cluster 模式：分步执行，无法保证原子性，但能避免 CROSSSLOT 错误
       // 并行执行以提高效率
@@ -286,7 +286,7 @@ export class RedisScanManager {
         "addIndex",
         [key, bucketKey],
         [value],
-        (pipeline) => {
+        pipeline => {
           pipeline.set(key, value);
           pipeline.zadd(bucketKey, 0, key);
         }
@@ -312,7 +312,7 @@ export class RedisScanManager {
     if (typeof keys === "string") {
       keysArray = [keys];
     } else if (Array.isArray(keys)) {
-        keysArray = keys;
+      keysArray = keys;
     }
 
     if (keysArray.length === 0) {
@@ -347,7 +347,7 @@ export class RedisScanManager {
           "mDelIndex",
           [String(keysAndBuckets.length), ...keysAndBuckets],
           [],
-          (pipeline) => {
+          pipeline => {
             for (let j = 0; j < keysAndBuckets.length; j += 2) {
               const key = keysAndBuckets[j];
               const bucketKey = keysAndBuckets[j + 1];
@@ -386,12 +386,9 @@ export class RedisScanManager {
 
     for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
       const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
-      const pipeline = this._buildBatchPipeline(
-        bucketBatch,
-        (p, bucketKey) => {
-          p.zrangebylex(bucketKey, lexStart, lexEnd, "LIMIT", 0, limit);
-        }
-      );
+      const pipeline = this._buildBatchPipeline(bucketBatch, (p, bucketKey) => {
+        p.zrangebylex(bucketKey, lexStart, lexEnd, "LIMIT", 0, limit);
+      });
 
       const batchResults = await pipeline.exec();
 
@@ -399,13 +396,13 @@ export class RedisScanManager {
       let batchKeys: string[] = [];
       if (batchResults) {
         for (const [err, keys] of batchResults) {
-            if (err) {
-              console.error("Scan error:", err);
-              continue;
-            }
-            if (keys && (keys as string[]).length > 0) {
-              batchKeys.push(...(keys as string[]));
-            }
+          if (err) {
+            console.error("Scan error:", err);
+            continue;
+          }
+          if (keys && (keys as string[]).length > 0) {
+            batchKeys.push(...(keys as string[]));
+          }
         }
       }
 
@@ -426,7 +423,7 @@ export class RedisScanManager {
     }
 
     const valuePromises = [];
-    
+
     for (let i = 0; i < allKeys.length; i += this.MGET_BATCH_SIZE) {
       const batchKeys = allKeys.slice(i, i + this.MGET_BATCH_SIZE);
       valuePromises.push(this.redis.mget(batchKeys));
@@ -438,7 +435,7 @@ export class RedisScanManager {
     // 拍平为 [key1, val1, key2, val2, ...]
     const result: string[] = [];
     for (let i = 0; i < allKeys.length; i++) {
-      result.push(allKeys[i], (values[i] as string));
+      result.push(allKeys[i], values[i] as string);
     }
     return result;
   }
@@ -465,12 +462,9 @@ export class RedisScanManager {
 
     for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
       const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
-      const pipeline = this._buildBatchPipeline(
-        bucketBatch,
-        (p, bucketKey) => {
-          p.zlexcount(bucketKey, lexStart, lexEnd);
-        }
-      );
+      const pipeline = this._buildBatchPipeline(bucketBatch, (p, bucketKey) => {
+        p.zlexcount(bucketKey, lexStart, lexEnd);
+      });
 
       promises.push(pipeline.exec());
     }
@@ -480,13 +474,13 @@ export class RedisScanManager {
     for (const batchResults of allBatchResults) {
       if (batchResults) {
         for (const [err, count] of batchResults) {
-            if (err) {
-              console.error("Count error:", err);
-              continue;
-            }
-            if (typeof count === "number") {
-              totalCount += count;
-            }
+          if (err) {
+            console.error("Count error:", err);
+            continue;
+          }
+          if (typeof count === "number") {
+            totalCount += count;
+          }
         }
       }
     }
@@ -519,50 +513,50 @@ export class RedisScanManager {
     let minItems = Number.MAX_SAFE_INTEGER;
     let maxItems = 0;
     let emptyBuckets = 0;
-    
+
     let minBucketSuffix = "";
     let maxBucketSuffix = "";
 
     const bucketsData: Record<string, number> = {};
 
     if (results) {
-        for (let i = 0; i < results.length; i++) {
-            const [err, count] = results[i];
-            const suffix = this.buckets[i];
-      
-            if (err) {
-              console.error(`Error getting ZCARD for bucket ${suffix}:`, err);
-              continue;
-            }
-      
-            // 确保 count 是数字
-            const size = typeof count === "number" ? count : 0;
-            
-            totalItems += size;
-      
-            if (size === 0) {
-              emptyBuckets++;
-            }
-      
-            if (size < minItems) {
-              minItems = size;
-              minBucketSuffix = suffix;
-            }
-      
-            if (size > maxItems) {
-              maxItems = size;
-              maxBucketSuffix = suffix;
-            }
-      
-            if (details) {
-              bucketsData[suffix] = size;
-            }
-          }
+      for (let i = 0; i < results.length; i++) {
+        const [err, count] = results[i];
+        const suffix = this.buckets[i];
+
+        if (err) {
+          console.error(`Error getting ZCARD for bucket ${suffix}:`, err);
+          continue;
+        }
+
+        // 确保 count 是数字
+        const size = typeof count === "number" ? count : 0;
+
+        totalItems += size;
+
+        if (size === 0) {
+          emptyBuckets++;
+        }
+
+        if (size < minItems) {
+          minItems = size;
+          minBucketSuffix = suffix;
+        }
+
+        if (size > maxItems) {
+          maxItems = size;
+          maxBucketSuffix = suffix;
+        }
+
+        if (details) {
+          bucketsData[suffix] = size;
+        }
+      }
     }
 
     // 如果所有桶都为空，minItems 重置为 0
     if (totalItems === 0) {
-        minItems = 0;
+      minItems = 0;
     }
 
     const totalBuckets = this.buckets.length;
@@ -573,19 +567,19 @@ export class RedisScanManager {
       meta: {
         hashChars: this.hashChars,
         totalBuckets: totalBuckets,
-        indexPrefix: this.indexPrefix,
+        indexPrefix: this.indexPrefix
       },
       stats: {
         totalItems: totalItems,
         avgItems: parseFloat(avgItems.toFixed(2)),
         minItems: minItems,
         maxItems: maxItems,
-        emptyBuckets: emptyBuckets,
+        emptyBuckets: emptyBuckets
       },
       outliers: {
         maxBucket: { suffix: maxBucketSuffix, count: maxItems },
-        minBucket: { suffix: minBucketSuffix, count: minItems },
-      },
+        minBucket: { suffix: minBucketSuffix, count: minItems }
+      }
     };
 
     if (details) {

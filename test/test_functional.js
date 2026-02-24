@@ -4,25 +4,25 @@ import assert from "assert/strict";
 
 const config = {
   host: "localhost",
-  port: 6379,
+  port: 6379
 };
 
 async function runFunctionalTest() {
   console.log("🚀 Starting Functional Test...");
-  
+
   const redis = new Redis(config);
   const manager = new RedisScanManager({
     redis,
     indexPrefix: "func_idx:",
-    hashChars: 1, // Use fewer buckets for small scale test
+    hashChars: 1 // Use fewer buckets for small scale test
   });
 
   const PREFIX = "func_user:";
-  
+
   try {
     // 0. Clean up previous test data
     console.log("🧹 Cleaning up previous data...");
-    await manager.scan(PREFIX, undefined, 1000).then(async (results) => {
+    await manager.scan(PREFIX, undefined, 1000).then(async results => {
       const keys = [];
       for (let i = 0; i < results.length; i += 2) {
         keys.push(results[i]);
@@ -39,7 +39,7 @@ async function runFunctionalTest() {
       { id: "002", name: "Bob", role: "user" },
       { id: "003", name: "Charlie", role: "user" },
       { id: "004", name: "Dave", role: "guest" },
-      { id: "005", name: "Eve", role: "admin" },
+      { id: "005", name: "Eve", role: "admin" }
     ];
 
     for (const user of users) {
@@ -56,8 +56,12 @@ async function runFunctionalTest() {
     // 3. Test Scan (All)
     console.log("🔍 Testing scan(all)...");
     const allUsers = await manager.scan(PREFIX, undefined, 10);
-    assert.equal(allUsers.length, 10, "Should return 10 items (5 keys + 5 values)");
-    
+    assert.equal(
+      allUsers.length,
+      10,
+      "Should return 10 items (5 keys + 5 values)"
+    );
+
     // Verify content
     const firstKey = allUsers[0];
     const firstVal = JSON.parse(allUsers[1]);
@@ -79,7 +83,7 @@ async function runFunctionalTest() {
     await manager.del(`${PREFIX}001`);
     const countAfterDel = await manager.count(PREFIX);
     assert.equal(countAfterDel, 4, "Count should be 4 after deleting 1");
-    
+
     const checkDel = await manager.scan(`${PREFIX}001`, `${PREFIX}001`, 10);
     assert.equal(checkDel.length, 0, "Deleted key should not be found");
     console.log("✅ Single delete verified.");
@@ -88,7 +92,11 @@ async function runFunctionalTest() {
     console.log("🗑️ Testing del(batch)...");
     await manager.del([`${PREFIX}002`, `${PREFIX}003`]);
     const countAfterBatchDel = await manager.count(PREFIX);
-    assert.equal(countAfterBatchDel, 2, "Count should be 2 after deleting 2 more");
+    assert.equal(
+      countAfterBatchDel,
+      2,
+      "Count should be 2 after deleting 2 more"
+    );
     console.log("✅ Batch delete verified.");
 
     // 7. Cleanup remaining
@@ -98,7 +106,6 @@ async function runFunctionalTest() {
     console.log("✅ Cleanup verified.");
 
     console.log("\n🎉 All functional tests passed!");
-
   } catch (err) {
     console.error("\n❌ Test Failed:", err);
     process.exit(1);

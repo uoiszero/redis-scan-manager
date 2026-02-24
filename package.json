@@ -27,7 +27,8 @@
   "scripts": {
     "build": "tsup",
     "prepublishOnly": "npm run build",
-    "test:func": "npm run build && node test/test_functional.js"
+    "test:func": "npm run build && node test/test_functional.js",
+    "format": "prettier --write \"src/**/*.{js,ts}\" \"test/**/*.{js,ts}\""
   },
   "files": [
     "dist",
@@ -45,6 +46,7 @@
   "devDependencies": {
     "@types/node": "^25.3.0",
     "esbuild": "^0.27.2",
+    "prettier": "^3.8.1",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3"
   },
