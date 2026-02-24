@@ -7,7 +7,52 @@ function _interopDefault (e) { return e && e.__esModule ? e : { default: e }; }
 
 var crypto__default = /*#__PURE__*/_interopDefault(crypto);
 
-// src/index.ts
+// src/RedisScanManager.ts
+
+// src/lua/scripts.ts
+var ADD_INDEX_SCRIPT = `
+  redis.call('SET', KEYS[1], ARGV[1])
+  redis.call('ZADD', KEYS[2], 0, KEYS[1])
+`;
+var M_DEL_INDEX_SCRIPT = `
+  for i=1, #KEYS, 2 do
+    redis.call('DEL', KEYS[i])
+    redis.call('ZREM', KEYS[i+1], KEYS[i])
+  end
+`;
+
+// src/utils/key-range.ts
+function inferRange(startKey, endKey) {
+  const lexStart = `[${startKey}`;
+  let lexEnd;
+  if (!endKey) {
+    const match = startKey.match(/^([a-zA-Z0-9]+)(_|:|-|\/|#)/);
+    if (match) {
+      const prefix = match[0];
+      const lastChar = prefix.slice(-1);
+      const nextChar = String.fromCharCode(lastChar.charCodeAt(0) + 1);
+      const nextPrefix = prefix.slice(0, -1) + nextChar;
+      lexEnd = `(${nextPrefix}`;
+    } else {
+      throw new Error(
+        "Cannot infer endKey from startKey. Please provide an explicit endKey to avoid full scan."
+      );
+    }
+  } else {
+    lexEnd = `[${endKey}`;
+  }
+  return { lexStart, lexEnd };
+}
+function getBucketName(indexPrefix, suffix) {
+  return `${indexPrefix}${suffix}`;
+}
+function getBucketKey(key, indexPrefix, hashChars) {
+  const hash = crypto__default.default.createHash("md5").update(key).digest("hex");
+  const bucketSuffix = hash.substring(0, hashChars);
+  return getBucketName(indexPrefix, bucketSuffix);
+}
+
+// src/RedisScanManager.ts
 var RedisScanManager = class {
   /**
    * @param {Object} options
@@ -58,20 +103,12 @@ var RedisScanManager = class {
       if (typeof this.redis.addIndex !== "function") {
         this.redis.defineCommand("addIndex", {
           numberOfKeys: 2,
-          lua: `
-          redis.call('SET', KEYS[1], ARGV[1])
-          redis.call('ZADD', KEYS[2], 0, KEYS[1])
-        `
+          lua: ADD_INDEX_SCRIPT
         });
       }
       if (typeof this.redis.mDelIndex !== "function") {
         this.redis.defineCommand("mDelIndex", {
-          lua: `
-          for i=1, #KEYS, 2 do
-            redis.call('DEL', KEYS[i])
-            redis.call('ZREM', KEYS[i+1], KEYS[i])
-          end
-        `
+          lua: M_DEL_INDEX_SCRIPT
         });
       }
     }
@@ -89,55 +126,6 @@ var RedisScanManager = class {
       }
       this._initLuaScripts();
     }
-  }
-  /**
-   * 内部方法：推导 Key 的字典序范围
-   * @private
-   * @param {string} startKey - 起始 Key
-   * @param {string} [endKey] - 结束 Key
-   * @returns {{lexStart: string, lexEnd: string}} Redis ZSET 字典序范围
-   */
-  _inferRange(startKey, endKey) {
-    const lexStart = `[${startKey}`;
-    let lexEnd;
-    if (!endKey) {
-      const match = startKey.match(/^([a-zA-Z0-9]+)(_|:|-|\/|#)/);
-      if (match) {
-        const prefix = match[0];
-        const lastChar = prefix.slice(-1);
-        const nextChar = String.fromCharCode(lastChar.charCodeAt(0) + 1);
-        const nextPrefix = prefix.slice(0, -1) + nextChar;
-        lexEnd = `(${nextPrefix}`;
-      } else {
-        throw new Error(
-          "Cannot infer endKey from startKey. Please provide an explicit endKey to avoid full scan."
-        );
-      }
-    } else {
-      lexEnd = `[${endKey}`;
-    }
-    return { lexStart, lexEnd };
-  }
-  /**
-   * 内部方法：根据后缀获取桶的完整 Key
-   * @private
-   * @param {string} suffix - 桶后缀
-   * @returns {string} 完整桶 Key
-   */
-  _getBucketName(suffix) {
-    return `${this.indexPrefix}${suffix}`;
-  }
-  /**
-   * 计算 Key 所属的桶名
-   *
-   * @private
-   * @param {string} key - 原始 Key
-   * @returns {string} 桶的完整 Key (prefix + hashSuffix)
-   */
-  _getBucketKey(key) {
-    const hash = crypto__default.default.createHash("md5").update(key).digest("hex");
-    const bucketSuffix = hash.substring(0, this.hashChars);
-    return this._getBucketName(bucketSuffix);
   }
   /**
    * 内部方法：执行原子操作 (Lua 脚本或降级 Pipeline)
@@ -170,7 +158,7 @@ var RedisScanManager = class {
   _buildBatchPipeline(bucketBatch, callback) {
     const pipeline = this.redis.pipeline();
     for (const bucketSuffix of bucketBatch) {
-      const bucketKey = this._getBucketName(bucketSuffix);
+      const bucketKey = getBucketName(this.indexPrefix, bucketSuffix);
       callback(pipeline, bucketKey);
     }
     return pipeline;
@@ -186,7 +174,7 @@ var RedisScanManager = class {
    * @returns {Promise<void>}
    */
   async add(key, value) {
-    const bucketKey = this._getBucketKey(key);
+    const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
     if (this.isCluster) {
       await Promise.all([
         this.redis.set(key, value),
@@ -232,7 +220,7 @@ var RedisScanManager = class {
       if (this.isCluster) {
         const pipeline = this.redis.pipeline();
         for (const key of batchKeys) {
-          const bucketKey = this._getBucketKey(key);
+          const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
           pipeline.del(key);
           pipeline.zrem(bucketKey, key);
         }
@@ -240,7 +228,7 @@ var RedisScanManager = class {
       } else {
         const keysAndBuckets = [];
         for (const key of batchKeys) {
-          const bucketKey = this._getBucketKey(key);
+          const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
           keysAndBuckets.push(key, bucketKey);
         }
         await this._execAtomic(
@@ -276,16 +264,13 @@ var RedisScanManager = class {
     if (!Number.isInteger(limit) || limit < 1 || limit > 1e3) {
       throw new Error("Limit must be an integer between 1 and 1000");
     }
-    const { lexStart, lexEnd } = this._inferRange(startKey, endKey);
+    const { lexStart, lexEnd } = inferRange(startKey, endKey);
     let allKeys = [];
     for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
       const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
-      const pipeline = this._buildBatchPipeline(
-        bucketBatch,
-        (p, bucketKey) => {
-          p.zrangebylex(bucketKey, lexStart, lexEnd, "LIMIT", 0, limit);
-        }
-      );
+      const pipeline = this._buildBatchPipeline(bucketBatch, (p, bucketKey) => {
+        p.zrangebylex(bucketKey, lexStart, lexEnd, "LIMIT", 0, limit);
+      });
       const batchResults2 = await pipeline.exec();
       let batchKeys = [];
       if (batchResults2) {
@@ -335,17 +320,14 @@ var RedisScanManager = class {
    */
   async count(startKey, endKey) {
     await this._ensureConnection();
-    const { lexStart, lexEnd } = this._inferRange(startKey, endKey);
+    const { lexStart, lexEnd } = inferRange(startKey, endKey);
     let totalCount = 0;
     const promises = [];
     for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
       const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
-      const pipeline = this._buildBatchPipeline(
-        bucketBatch,
-        (p, bucketKey) => {
-          p.zlexcount(bucketKey, lexStart, lexEnd);
-        }
-      );
+      const pipeline = this._buildBatchPipeline(bucketBatch, (p, bucketKey) => {
+        p.zlexcount(bucketKey, lexStart, lexEnd);
+      });
       promises.push(pipeline.exec());
     }
     const allBatchResults = await Promise.all(promises);
@@ -376,7 +358,7 @@ var RedisScanManager = class {
     await this._ensureConnection();
     const pipeline = this.redis.pipeline();
     for (const suffix of this.buckets) {
-      const bucketKey = this._getBucketName(suffix);
+      const bucketKey = getBucketName(this.indexPrefix, suffix);
       pipeline.zcard(bucketKey);
     }
     const results = await pipeline.exec();

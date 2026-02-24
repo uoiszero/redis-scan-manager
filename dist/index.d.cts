@@ -90,29 +90,6 @@ declare class RedisScanManager {
      */
     private _ensureConnection;
     /**
-     * 内部方法：推导 Key 的字典序范围
-     * @private
-     * @param {string} startKey - 起始 Key
-     * @param {string} [endKey] - 结束 Key
-     * @returns {{lexStart: string, lexEnd: string}} Redis ZSET 字典序范围
-     */
-    private _inferRange;
-    /**
-     * 内部方法：根据后缀获取桶的完整 Key
-     * @private
-     * @param {string} suffix - 桶后缀
-     * @returns {string} 完整桶 Key
-     */
-    private _getBucketName;
-    /**
-     * 计算 Key 所属的桶名
-     *
-     * @private
-     * @param {string} key - 原始 Key
-     * @returns {string} 桶的完整 Key (prefix + hashSuffix)
-     */
-    private _getBucketKey;
-    /**
      * 内部方法：执行原子操作 (Lua 脚本或降级 Pipeline)
      * @private
      * @param {string} scriptName - Lua 脚本方法名
