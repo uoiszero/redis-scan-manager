@@ -186,6 +186,9 @@ await manager.del("user:1001");
 项目包含完整的基准测试脚本，用于验证性能和一致性。
 
 ```bash
+# 构建项目 (使用 tsup)
+npm run build
+
 # 运行测试
 node test/test_redis_scan_manager.js
 ```
