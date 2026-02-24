@@ -191,6 +191,9 @@ npm run build
 
 # 运行测试
 node test/test_redis_scan_manager.js
+
+# 运行功能测试 (小规模快速验证)
+npm run test:func
 ```
 
 ---
