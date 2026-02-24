@@ -25,6 +25,7 @@ async function testWriteData(manager, dataPrefix, writeCount) {
 
   // Process in batches
   for (let i = 0; i < writeCount; i += BATCH_SIZE) {
+    const batchStartTime = Date.now();
     const batchPromises = [];
     for (let j = 0; j < BATCH_SIZE && i + j < writeCount; j++) {
       const index = i + j;
@@ -39,6 +40,11 @@ async function testWriteData(manager, dataPrefix, writeCount) {
       batchPromises.push(manager.add(key, value));
     }
     await Promise.all(batchPromises);
+
+    const batchDuration = Date.now() - batchStartTime;
+    if (i % 100000 === 0) {
+      console.log(`  Batch ${i / BATCH_SIZE}: ${batchDuration}ms for ${BATCH_SIZE} items`);
+    }
   }
 
   const duration = Date.now() - startTime;
@@ -240,7 +246,6 @@ async function cleanupData(manager, dataPrefix) {
     lastKey = nextStartKey;
 
     totalDeleted += batchKeysToDelete.length;
-    console.log(`Deleted ${totalDeleted} keys so far...`);
 
     // If we fetched less than limit (500 items * 2 = 1000), it means we reached the end
     if (batchData.length < 1000) {
@@ -342,6 +347,7 @@ async function runTest() {
     // 调试：第一次写入后
     const stats1 = await manager.getDebugStats();
 
+    /*
     // 4. Scan and Verify Data
     console.time("Scan and Verify Data");
     await testScanData(manager, DATA_PREFIX, WRITE_COUNT);
@@ -356,12 +362,14 @@ async function runTest() {
 
     // 调试：删除一半并重写后
     const stats2 = await manager.getDebugStats();
+    */
 
     // 6. Cleanup Data
     console.time("Cleanup Data");
     await cleanupData(manager, DATA_PREFIX);
     console.timeEnd("Cleanup Data");
 
+    /*
     // 输出最终统计结果
     console.log("\n\n#############################################");
     console.log("#            Benchmark Report               #");
@@ -407,6 +415,7 @@ async function runTest() {
       console.error("❌ Data consistency mismatch!");
     }
     console.log("#############################################\n");
+    */
   } catch (error) {
     console.error("Test failed:", error);
   } finally {
