@@ -4,14 +4,25 @@
   "type": "module",
   "description": "High-performance Redis secondary index manager with hash sharding",
   "main": "dist/index.cjs",
-  "module": "dist/index.mjs",
+  "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
+      "types": {
+        "import": "./dist/index.d.ts",
+        "require": "./dist/index.d.cts"
+      },
+      "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/uoiszero/redis-scan-manager.git"
+  },
+  "homepage": "https://github.com/uoiszero/redis-scan-manager#readme",
+  "bugs": {
+    "url": "https://github.com/uoiszero/redis-scan-manager/issues"
   },
   "scripts": {
     "build": "tsup",
@@ -19,7 +30,9 @@
     "test:func": "npm run build && node test/test_functional.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "keywords": [
     "redis",
