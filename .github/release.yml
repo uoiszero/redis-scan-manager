@@ -1,0 +1,25 @@
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+    authors:
+      - renovate-bot
+  categories:
+    - title: '🚀 New Features'
+      labels:
+        - 'enhancement'
+        - 'feature'
+    - title: '🐛 Bug Fixes'
+      labels:
+        - 'bug'
+        - 'fix'
+    - title: '⚡ Performance Improvements'
+      labels:
+        - 'performance'
+        - 'perf'
+    - title: '🧰 Maintenance'
+      labels:
+        - 'chore'
+        - 'documentation'
+        - 'docs'
+        - 'internal'
