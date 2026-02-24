@@ -1,5 +1,7 @@
 # Redis Scan Manager
 
+[![NPM](https://nodei.co/npm/redis-scan-manager.png)](https://www.npmjs.com/package/redis-scan-manager)
+
 `redis-scan-manager` 是一个基于 Hash 分桶策略的高性能 Redis 二级索引管理器。它专为解决海量数据下的索引热点问题而设计，支持高效的范围查询（Range Scan）和原子性的数据操作。
 
 **注意：本模块专为千万级及以上数据量设计。如果数据量较小（< 10万），建议直接使用原生 Redis ZSET，性能会更好。**
