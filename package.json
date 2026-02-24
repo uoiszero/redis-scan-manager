@@ -1,0 +1,35 @@
+{
+  "name": "redis-scan-manager",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "High-performance Redis secondary index manager with hash sharding",
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "scripts": {
+    "build": "node build.js",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "redis",
+    "index",
+    "secondary-index",
+    "sharding"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "esbuild": "^0.27.2"
+  },
+  "dependencies": {
+    "ioredis": "^5.9.2"
+  }
+}
