@@ -1,5 +1,5 @@
 import Redis from "ioredis";
-import { RedisIndexManager } from "../redis_index_manager.js";
+import { RedisScanManager } from "../redis_scan_manager.js";
 
 const config = {
   host: "localhost",
@@ -12,7 +12,7 @@ const config = {
  * 按照 BATCH_SIZE (默认500) 进行并发写入，以提高写入效率。
  * Key 格式为 `{dataPrefix}{00000-N}`，Value 为包含 id, name, timestamp 的 JSON 字符串。
  *
- * @param {RedisIndexManager} manager - RedisIndexManager 实例
+ * @param {RedisScanManager} manager - RedisScanManager 实例
  * @param {string} dataPrefix - 测试数据的 Key 前缀 (如 "test_user:")
  * @param {number} writeCount - 写入的数据总量
  * @returns {Promise<void>}
@@ -51,7 +51,7 @@ async function testWriteData(manager, dataPrefix, writeCount) {
  * 1. 使用 count() 方法统计总数，验证与写入数量是否一致。
  * 2. 使用 scan() 方法获取前 10 条数据，验证返回的数据结构与顺序是否正确。
  *
- * @param {RedisIndexManager} manager - RedisIndexManager 实例
+ * @param {RedisScanManager} manager - RedisScanManager 实例
  * @param {string} dataPrefix - 测试数据的 Key 前缀
  * @param {number} expectedCount - 期望的数据总量
  * @returns {Promise<void>}
@@ -97,7 +97,7 @@ async function testScanData(manager, dataPrefix, expectedCount) {
  * 4. 写入 123 条新数据。
  * 5. 验证总数量是否正确。
  *
- * @param {RedisIndexManager} manager
+ * @param {RedisScanManager} manager
  * @param {string} dataPrefix
  * @param {number} totalCount
  */
@@ -191,7 +191,7 @@ async function testPartialDeleteAndRewrite(manager, dataPrefix, totalCount) {
  * 3. 利用分页游标 (Next Key) 确保不重不漏。
  * 4. 清理完成后通过 count() 再次验证。
  *
- * @param {RedisIndexManager} manager - RedisIndexManager 实例
+ * @param {RedisScanManager} manager - RedisScanManager 实例
  * @param {string} dataPrefix - 待清理数据的 Key 前缀
  * @returns {Promise<void>}
  */
@@ -271,7 +271,7 @@ async function cleanupData(manager, dataPrefix) {
  * @returns {Promise<void>}
  */
 async function runTest() {
-  console.log("Starting RedisIndexManager test...");
+  console.log("Starting RedisScanManager test...");
 
   // 1. Initialize Redis Client
   let redis;
@@ -324,8 +324,8 @@ async function runTest() {
     const pingResult = await redis.ping();
     console.log("Redis Connection Test (PING):", pingResult);
 
-    // 2. Initialize RedisIndexManager
-    const manager = new RedisIndexManager({
+    // 2. Initialize RedisScanManager
+    const manager = new RedisScanManager({
       redis: redis,
       indexPrefix: "test_idx:", // Use a test prefix for index
       hashChars: 2,

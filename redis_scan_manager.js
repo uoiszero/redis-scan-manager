@@ -8,23 +8,23 @@ import crypto from "crypto";
  *
  * 核心特性：
  * 1. **分桶策略**：对 Key 进行 Hash 后取前 N 位 (Hex) 分桶，将索引均匀打散到多个 ZSET 中。
-   * 2. **Scatter-Gather 查询**：范围查询时并发扫描所有相关桶，并在内存中进行归并排序。
-   * 3. **内存保护**：Scan 采用分批合并 (Incremental Merge) 策略，防止 Limit 放大效应导致的内存溢出。
-   * 4. **原子操作**：使用 Lua 脚本保证索引与源数据的一致性。
-   *
-   * **Redis Cluster 注意事项**：
-   * 本模块的原子性依赖 Lua 脚本同时操作 Data Key 和 Index Bucket Key。
-   * 在 Redis Cluster 模式下，除非这两个 Key 在同一个 Slot (使用 Hash Tag {...})，否则 Lua 脚本会报错 `CROSSSLOT`。
-   * 由于本模块采用 Hash 分桶策略，Data Key 和 Bucket Key 天然很难在同一个 Slot。
-   * 因此，**本模块默认仅适用于单机 Redis 或支持多 Key 事务的代理环境**。
-   * 如果需要在 Cluster 下使用，建议放弃原子性，修改 `add/del` 为分步操作。
-   *
-   * @example
-   * const manager = new RedisIndexManager({ redis: redisClient, hashChars: 2 });
+ * 2. **Scatter-Gather 查询**：范围查询时并发扫描所有相关桶，并在内存中进行归并排序。
+ * 3. **内存保护**：Scan 采用分批合并 (Incremental Merge) 策略，防止 Limit 放大效应导致的内存溢出。
+ * 4. **原子操作**：使用 Lua 脚本保证索引与源数据的一致性。
+ *
+ * **Redis Cluster 注意事项**：
+ * 本模块的原子性依赖 Lua 脚本同时操作 Data Key 和 Index Bucket Key。
+ * 在 Redis Cluster 模式下，除非这两个 Key 在同一个 Slot (使用 Hash Tag {...})，否则 Lua 脚本会报错 `CROSSSLOT`。
+ * 由于本模块采用 Hash 分桶策略，Data Key 和 Bucket Key 天然很难在同一个 Slot。
+ * 因此，**本模块默认仅适用于单机 Redis 或支持多 Key 事务的代理环境**。
+ * 如果需要在 Cluster 下使用，建议放弃原子性，修改 `add/del` 为分步操作。
+ *
+ * @example
+ * const manager = new RedisScanManager({ redis: redisClient, hashChars: 2 });
  * await manager.add("user:1001", JSON.stringify({ name: "Alice" }));
  * const users = await manager.scan("user:1000", "user:1005", 10);
  */
-export class RedisIndexManager {
+export class RedisScanManager {
   /**
    * @param {Object} options
    * @param {Redis|Object} [options.redis] - ioredis 实例，或 ioredis 构造函数参数 (配置对象)

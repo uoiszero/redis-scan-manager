@@ -30,11 +30,11 @@ npm install redis-scan-manager
 
 ```javascript
 import Redis from "ioredis";
-import { RedisIndexManager } from "redis-scan-manager";
+import { RedisScanManager } from "redis-scan-manager";
 
 // 方式 A: 传入 ioredis 实例
 const redis = new Redis();
-const manager = new RedisIndexManager({
+const manager = new RedisScanManager({
   redis: redis,
   indexPrefix: "idx:", 
   hashChars: 2
@@ -42,7 +42,7 @@ const manager = new RedisIndexManager({
 
 // 方式 B: 传入配置对象 (Lazy Connect)
 // 连接会在第一次调用 add/scan 等方法时自动建立
-const managerLazy = new RedisIndexManager({
+const managerLazy = new RedisScanManager({
   redis: {
     host: "127.0.0.1",
     port: 6379,
@@ -187,5 +187,5 @@ await manager.del("user:1001");
 
 ```bash
 # 运行测试
-node test/test_redis_index_manager.js
+node test/test_redis_scan_manager.js
 ```

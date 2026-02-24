@@ -1,7 +1,7 @@
-// redis_index_manager_optimized.js
+// redis_scan_manager.js
 import Redis from "ioredis";
 import crypto from "crypto";
-var RedisIndexManager = class {
+var RedisScanManager = class {
   /**
    * @param {Object} options
    * @param {Redis|Object} [options.redis] - ioredis 实例，或 ioredis 构造函数参数 (配置对象)
@@ -17,11 +17,16 @@ var RedisIndexManager = class {
    * 如果数据量较小（例如少于 10 万条），直接使用单个 Redis ZSET 的性能通常优于本方案，不建议使用此管理器。
    */
   constructor(options) {
+    this.isCluster = false;
     if (options.redis && typeof options.redis.pipeline === "function") {
       this.redis = options.redis;
+      this.isCluster = !!this.redis.isCluster;
       this._initLuaScripts();
     } else {
       this.redisConfig = options.redis;
+      if (Array.isArray(options.redis)) {
+        this.isCluster = true;
+      }
     }
     this.indexPrefix = options.indexPrefix || "idx:";
     const hashChars = options.hashChars || 2;
@@ -52,12 +57,13 @@ var RedisIndexManager = class {
         `
         });
       }
-      if (typeof this.redis.delIndex !== "function") {
-        this.redis.defineCommand("delIndex", {
-          numberOfKeys: 2,
+      if (typeof this.redis.mDelIndex !== "function") {
+        this.redis.defineCommand("mDelIndex", {
           lua: `
-          redis.call('DEL', KEYS[1])
-          redis.call('ZREM', KEYS[2], KEYS[1])
+          for i=1, #KEYS, 2 do
+            redis.call('DEL', KEYS[i])
+            redis.call('ZREM', KEYS[i+1], KEYS[i])
+          end
         `
         });
       }
@@ -69,7 +75,11 @@ var RedisIndexManager = class {
    */
   async _ensureConnection() {
     if (!this.redis) {
-      this.redis = new Redis(this.redisConfig);
+      if (this.isCluster) {
+        this.redis = new Redis.Cluster(this.redisConfig);
+      } else {
+        this.redis = new Redis(this.redisConfig);
+      }
       this._initLuaScripts();
     } else if (this.redis.status === "end" || this.redis.status === "close" || this.redis.status === "wait") {
     }
@@ -87,7 +97,11 @@ var RedisIndexManager = class {
     if (!endKey) {
       const match = startKey.match(/^([a-zA-Z0-9]+)(_|:|-|\/|#)/);
       if (match) {
-        lexEnd = `[${match[0]}\xFF`;
+        const prefix = match[0];
+        const lastChar = prefix.slice(-1);
+        const nextChar = String.fromCharCode(lastChar.charCodeAt(0) + 1);
+        const nextPrefix = prefix.slice(0, -1) + nextChar;
+        lexEnd = `(${nextPrefix}`;
       } else {
         throw new Error(
           "Cannot infer endKey from startKey. Please provide an explicit endKey to avoid full scan."
@@ -167,30 +181,74 @@ var RedisIndexManager = class {
    */
   async add(key, value) {
     const bucketKey = this._getBucketKey(key);
-    await this._execAtomic(
-      "addIndex",
-      [key, bucketKey],
-      [value],
-      (pipeline) => {
-        pipeline.set(key, value);
-        pipeline.zadd(bucketKey, 0, key);
-      }
-    );
+    if (this.isCluster) {
+      await Promise.all([
+        this.redis.set(key, value),
+        this.redis.zadd(bucketKey, 0, key)
+      ]);
+    } else {
+      await this._execAtomic(
+        "addIndex",
+        [key, bucketKey],
+        [value],
+        (pipeline) => {
+          pipeline.set(key, value);
+          pipeline.zadd(bucketKey, 0, key);
+        }
+      );
+    }
   }
   /**
-   * 删除数据及其索引 (原子操作)
+   * 删除数据及其索引 (支持单条或批量原子删除)
    *
-   * 使用 Lua 脚本同时删除 KV 数据和 ZSET 中的索引条目。
+   * 自动识别参数类型：
+   * - 传入字符串：作为单个 Key 删除
+   * - 传入字符串数组：作为多个 Key 批量删除
    *
-   * @param {string} key - 待删除数据的唯一标识
+   * 使用 Lua 脚本一次性删除多个 KV 数据和 ZSET 中的索引条目。
+   *
+   * @param {string|Array<string>} keys - 待删除的 key 或 keys 数组
    * @returns {Promise<void>}
    */
-  async del(key) {
-    const bucketKey = this._getBucketKey(key);
-    await this._execAtomic("delIndex", [key, bucketKey], [], (pipeline) => {
-      pipeline.del(key);
-      pipeline.zrem(bucketKey, key);
-    });
+  async del(keys) {
+    if (typeof keys === "string") {
+      keys = [keys];
+    }
+    if (!Array.isArray(keys) || keys.length === 0) {
+      return;
+    }
+    const BATCH_SIZE = 1e3;
+    for (let i = 0; i < keys.length; i += BATCH_SIZE) {
+      const batchKeys = keys.slice(i, i + BATCH_SIZE);
+      if (this.isCluster) {
+        const pipeline = this.redis.pipeline();
+        for (const key of batchKeys) {
+          const bucketKey = this._getBucketKey(key);
+          pipeline.del(key);
+          pipeline.zrem(bucketKey, key);
+        }
+        await pipeline.exec();
+      } else {
+        const keysAndBuckets = [];
+        for (const key of batchKeys) {
+          const bucketKey = this._getBucketKey(key);
+          keysAndBuckets.push(key, bucketKey);
+        }
+        await this._execAtomic(
+          "mDelIndex",
+          [keysAndBuckets.length, ...keysAndBuckets],
+          [],
+          (pipeline) => {
+            for (let j = 0; j < keysAndBuckets.length; j += 2) {
+              const key = keysAndBuckets[j];
+              const bucketKey = keysAndBuckets[j + 1];
+              pipeline.del(key);
+              pipeline.zrem(bucketKey, key);
+            }
+          }
+        );
+      }
+    }
   }
   /**
    * 范围扫描 (Scatter-Gather Scan) - 内存优化版
@@ -293,7 +351,82 @@ var RedisIndexManager = class {
     }
     return totalCount;
   }
+  /**
+   * 获取索引调试统计信息
+   *
+   * 用于分析分桶的健康状况，例如总数据量、每个桶的负载、是否存在数据倾斜等。
+   *
+   * @param {boolean} [details=false] - 是否返回每个桶的详细数据量 (可能会比较大)
+   * @returns {Promise<Object>} 统计信息对象
+   */
+  async getDebugStats(details = false) {
+    await this._ensureConnection();
+    const pipeline = this.redis.pipeline();
+    for (const suffix of this.buckets) {
+      const bucketKey = this._getBucketName(suffix);
+      pipeline.zcard(bucketKey);
+    }
+    const results = await pipeline.exec();
+    let totalItems = 0;
+    let minItems = Number.MAX_SAFE_INTEGER;
+    let maxItems = 0;
+    let emptyBuckets = 0;
+    let minBucketSuffix = "";
+    let maxBucketSuffix = "";
+    const bucketsData = {};
+    for (let i = 0; i < results.length; i++) {
+      const [err, count] = results[i];
+      const suffix = this.buckets[i];
+      if (err) {
+        console.error(`Error getting ZCARD for bucket ${suffix}:`, err);
+        continue;
+      }
+      const size = typeof count === "number" ? count : 0;
+      totalItems += size;
+      if (size === 0) {
+        emptyBuckets++;
+      }
+      if (size < minItems) {
+        minItems = size;
+        minBucketSuffix = suffix;
+      }
+      if (size > maxItems) {
+        maxItems = size;
+        maxBucketSuffix = suffix;
+      }
+      if (details) {
+        bucketsData[suffix] = size;
+      }
+    }
+    if (totalItems === 0) {
+      minItems = 0;
+    }
+    const totalBuckets = this.buckets.length;
+    const avgItems = totalBuckets > 0 ? totalItems / totalBuckets : 0;
+    const stats = {
+      meta: {
+        hashChars: this.hashChars,
+        totalBuckets,
+        indexPrefix: this.indexPrefix
+      },
+      stats: {
+        totalItems,
+        avgItems: parseFloat(avgItems.toFixed(2)),
+        minItems,
+        maxItems,
+        emptyBuckets
+      },
+      outliers: {
+        maxBucket: { suffix: maxBucketSuffix, count: maxItems },
+        minBucket: { suffix: minBucketSuffix, count: minItems }
+      }
+    };
+    if (details) {
+      stats.buckets = bucketsData;
+    }
+    return stats;
+  }
 };
 export {
-  RedisIndexManager
+  RedisScanManager
 };
