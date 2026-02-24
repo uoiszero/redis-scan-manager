@@ -1,5 +1,5 @@
 import Redis from "ioredis";
-import { RedisScanManager } from "../redis_scan_manager.js";
+import { RedisScanManager } from "../dist/index.js";
 
 const config = {
   host: "localhost",

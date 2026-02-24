@@ -1,5 +1,33 @@
-import Redis from "ioredis";
+import { Redis, type Cluster, type ChainableCommander } from "ioredis";
 import crypto from "crypto";
+
+interface RedisScanManagerOptions {
+  redis: Redis | Cluster | any;
+  indexPrefix?: string;
+  hashChars?: number;
+  scanBatchSize?: number;
+  mgetBatchSize?: number;
+}
+
+interface DebugStats {
+  meta: {
+    hashChars: number;
+    totalBuckets: number;
+    indexPrefix: string;
+  };
+  stats: {
+    totalItems: number;
+    avgItems: number;
+    minItems: number;
+    maxItems: number;
+    emptyBuckets: number;
+  };
+  outliers: {
+    maxBucket: { suffix: string; count: number };
+    minBucket: { suffix: string; count: number };
+  };
+  buckets?: Record<string, number>;
+}
 
 /**
  * Redis 二级索引管理器 (优化版)
@@ -25,6 +53,15 @@ import crypto from "crypto";
  * const users = await manager.scan("user:1000", "user:1005", 10);
  */
 export class RedisScanManager {
+  private redis!: Redis | Cluster;
+  private isCluster: boolean;
+  private redisConfig: any;
+  private indexPrefix: string;
+  private hashChars: number;
+  private SCAN_BATCH_SIZE: number;
+  private MGET_BATCH_SIZE: number;
+  private buckets: string[];
+
   /**
    * @param {Object} options
    * @param {Redis|Object} [options.redis] - ioredis 实例，或 ioredis 构造函数参数 (配置对象)
@@ -39,7 +76,7 @@ export class RedisScanManager {
    * 由于采用了 Hash 分桶和 Scatter-Gather (分散-聚合) 查询策略，会产生多次网络往返和并发开销。
    * 如果数据量较小（例如少于 10 万条），直接使用单个 Redis ZSET 的性能通常优于本方案，不建议使用此管理器。
    */
-  constructor(options) {
+  constructor(options: RedisScanManagerOptions) {
     // 检查 options.redis 是实例还是配置
     // ioredis 实例通常有 pipeline 方法
     this.isCluster = false;
@@ -47,7 +84,7 @@ export class RedisScanManager {
     if (options.redis && typeof options.redis.pipeline === "function") {
       this.redis = options.redis;
       // ioredis 的 Cluster 实例通常有 isCluster 属性
-      this.isCluster = !!this.redis.isCluster;
+      this.isCluster = !!(this.redis as any).isCluster;
       this._initLuaScripts();
     } else {
       // 视为配置对象，保存以备懒加载
@@ -81,11 +118,11 @@ export class RedisScanManager {
    * 内部方法：初始化 Lua 脚本
    * @private
    */
-  _initLuaScripts() {
-    if (typeof this.redis.defineCommand === "function") {
+  private _initLuaScripts() {
+    if (typeof (this.redis as any).defineCommand === "function") {
       // 避免重复定义 (检查 this.redis.addIndex 是否为函数)
-      if (typeof this.redis.addIndex !== "function") {
-        this.redis.defineCommand("addIndex", {
+      if (typeof (this.redis as any).addIndex !== "function") {
+        (this.redis as any).defineCommand("addIndex", {
           numberOfKeys: 2,
           lua: `
           redis.call('SET', KEYS[1], ARGV[1])
@@ -94,8 +131,8 @@ export class RedisScanManager {
         });
       }
 
-      if (typeof this.redis.mDelIndex !== "function") {
-        this.redis.defineCommand("mDelIndex", {
+      if (typeof (this.redis as any).mDelIndex !== "function") {
+        (this.redis as any).defineCommand("mDelIndex", {
           lua: `
           for i=1, #KEYS, 2 do
             redis.call('DEL', KEYS[i])
@@ -111,7 +148,7 @@ export class RedisScanManager {
    * 内部方法：确保 Redis 连接已建立 (Lazy Connect)
    * @private
    */
-  async _ensureConnection() {
+  private async _ensureConnection() {
     if (!this.redis) {
       if (this.isCluster) {
         this.redis = new Redis.Cluster(this.redisConfig);
@@ -119,13 +156,6 @@ export class RedisScanManager {
         this.redis = new Redis(this.redisConfig);
       }
       this._initLuaScripts();
-    } else if (
-      this.redis.status === "end" ||
-      this.redis.status === "close" ||
-      this.redis.status === "wait"
-    ) {
-      // 只有在非连接状态下才尝试重连或等待
-      // ioredis 会自动重连，这里主要用于防御性编程
     }
     // 如果是 Lazy Connect 模式，ioredis 会在第一个命令时自动连接，无需显式调用 connect
   }
@@ -137,9 +167,9 @@ export class RedisScanManager {
    * @param {string} [endKey] - 结束 Key
    * @returns {{lexStart: string, lexEnd: string}} Redis ZSET 字典序范围
    */
-  _inferRange(startKey, endKey) {
+  private _inferRange(startKey: string, endKey?: string) {
     const lexStart = `[${startKey}`;
-    let lexEnd;
+    let lexEnd: string;
 
     if (!endKey) {
       const match = startKey.match(/^([a-zA-Z0-9]+)(_|:|-|\/|#)/);
@@ -168,7 +198,7 @@ export class RedisScanManager {
    * @param {string} suffix - 桶后缀
    * @returns {string} 完整桶 Key
    */
-  _getBucketName(suffix) {
+  private _getBucketName(suffix: string) {
     return `${this.indexPrefix}${suffix}`;
   }
 
@@ -179,7 +209,7 @@ export class RedisScanManager {
    * @param {string} key - 原始 Key
    * @returns {string} 桶的完整 Key (prefix + hashSuffix)
    */
-  _getBucketKey(key) {
+  private _getBucketKey(key: string) {
     const hash = crypto.createHash("md5").update(key).digest("hex");
     const bucketSuffix = hash.substring(0, this.hashChars);
     return this._getBucketName(bucketSuffix);
@@ -193,10 +223,15 @@ export class RedisScanManager {
    * @param {Array<string>} args - Lua 脚本参数
    * @param {Function} fallbackFn - 降级 Pipeline 构建函数
    */
-  async _execAtomic(scriptName, keys, args, fallbackFn) {
+  private async _execAtomic(
+    scriptName: string, 
+    keys: string[], 
+    args: string[], 
+    fallbackFn: (pipeline: ChainableCommander) => void
+  ) {
     await this._ensureConnection();
-    if (typeof this.redis[scriptName] === "function") {
-      await this.redis[scriptName](...keys, ...args);
+    if (typeof (this.redis as any)[scriptName] === "function") {
+      await (this.redis as any)[scriptName](...keys, ...args);
     } else {
       console.warn(
         "[RedisIndexManager] Lua scripts not supported. Falling back to non-atomic pipeline. Data consistency is NOT guaranteed."
@@ -214,7 +249,10 @@ export class RedisScanManager {
    * @param {Function} callback - (pipeline, bucketKey) => void
    * @returns {Object} pipeline 对象
    */
-  _buildBatchPipeline(bucketBatch, callback) {
+  private _buildBatchPipeline(
+    bucketBatch: string[], 
+    callback: (pipeline: ChainableCommander, bucketKey: string) => void
+  ) {
     const pipeline = this.redis.pipeline();
     for (const bucketSuffix of bucketBatch) {
       const bucketKey = this._getBucketName(bucketSuffix);
@@ -233,7 +271,7 @@ export class RedisScanManager {
    * @param {string} value - 数据内容 (字符串或序列化后的 JSON)
    * @returns {Promise<void>}
    */
-  async add(key, value) {
+  async add(key: string, value: string) {
     const bucketKey = this._getBucketKey(key);
     
     if (this.isCluster) {
@@ -268,21 +306,24 @@ export class RedisScanManager {
    * @param {string|Array<string>} keys - 待删除的 key 或 keys 数组
    * @returns {Promise<void>}
    */
-  async del(keys) {
+  async del(keys: string | string[]) {
     // 兼容单字符串参数
+    let keysArray: string[] = [];
     if (typeof keys === "string") {
-      keys = [keys];
+      keysArray = [keys];
+    } else if (Array.isArray(keys)) {
+        keysArray = keys;
     }
 
-    if (!Array.isArray(keys) || keys.length === 0) {
+    if (keysArray.length === 0) {
       return;
     }
 
     // Fix: Process in batches to avoid stack overflow
     const BATCH_SIZE = 1000;
 
-    for (let i = 0; i < keys.length; i += BATCH_SIZE) {
-      const batchKeys = keys.slice(i, i + BATCH_SIZE);
+    for (let i = 0; i < keysArray.length; i += BATCH_SIZE) {
+      const batchKeys = keysArray.slice(i, i + BATCH_SIZE);
 
       if (this.isCluster) {
         // Cluster 模式：使用 Pipeline 并发删除
@@ -294,7 +335,7 @@ export class RedisScanManager {
         }
         await pipeline.exec();
       } else {
-        const keysAndBuckets = [];
+        const keysAndBuckets: string[] = [];
         for (const key of batchKeys) {
           const bucketKey = this._getBucketKey(key);
           keysAndBuckets.push(key, bucketKey);
@@ -304,7 +345,7 @@ export class RedisScanManager {
         // 所有的参数都是 Key (key, bucketKey, key, bucketKey...)
         await this._execAtomic(
           "mDelIndex",
-          [keysAndBuckets.length, ...keysAndBuckets],
+          [String(keysAndBuckets.length), ...keysAndBuckets],
           [],
           (pipeline) => {
             for (let j = 0; j < keysAndBuckets.length; j += 2) {
@@ -331,7 +372,7 @@ export class RedisScanManager {
    * @returns {Promise<Array<string>>} Key 和 Value 交替排列的扁平数组 [key1, val1, key2, val2...]
    * @throws {Error} 如果 limit 不合法或无法推导 endKey 范围时抛出异常
    */
-  async scan(startKey, endKey, limit = 100) {
+  async scan(startKey: string, endKey?: string, limit = 100) {
     await this._ensureConnection();
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
       throw new Error("Limit must be an integer between 1 and 1000");
@@ -341,7 +382,7 @@ export class RedisScanManager {
 
     // console.log(`[Scan Optimized] Range: [${startKey}, ${endKey || "AUTO"}], Limit: ${limit}`);
 
-    let allKeys = [];
+    let allKeys: string[] = [];
 
     for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
       const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
@@ -355,14 +396,16 @@ export class RedisScanManager {
       const batchResults = await pipeline.exec();
 
       // 优化：分批合并 (Incremental Merge)
-      let batchKeys = [];
-      for (const [err, keys] of batchResults) {
-        if (err) {
-          console.error("Scan error:", err);
-          continue;
-        }
-        if (keys && keys.length > 0) {
-          batchKeys.push(...keys);
+      let batchKeys: string[] = [];
+      if (batchResults) {
+        for (const [err, keys] of batchResults) {
+            if (err) {
+              console.error("Scan error:", err);
+              continue;
+            }
+            if (keys && (keys as string[]).length > 0) {
+              batchKeys.push(...(keys as string[]));
+            }
         }
       }
 
@@ -393,9 +436,9 @@ export class RedisScanManager {
     const values = batchResults.flat();
 
     // 拍平为 [key1, val1, key2, val2, ...]
-    const result = [];
+    const result: string[] = [];
     for (let i = 0; i < allKeys.length; i++) {
-      result.push(allKeys[i], values[i]);
+      result.push(allKeys[i], (values[i] as string));
     }
     return result;
   }
@@ -410,7 +453,7 @@ export class RedisScanManager {
    * @param {string} [endKey] - 结束 Key (包含)。自动推导逻辑同 scan。
    * @returns {Promise<number>} 数据总数
    */
-  async count(startKey, endKey) {
+  async count(startKey: string, endKey?: string) {
     await this._ensureConnection();
 
     const { lexStart, lexEnd } = this._inferRange(startKey, endKey);
@@ -435,13 +478,15 @@ export class RedisScanManager {
     const allBatchResults = await Promise.all(promises);
 
     for (const batchResults of allBatchResults) {
-      for (const [err, count] of batchResults) {
-        if (err) {
-          console.error("Count error:", err);
-          continue;
-        }
-        if (typeof count === "number") {
-          totalCount += count;
+      if (batchResults) {
+        for (const [err, count] of batchResults) {
+            if (err) {
+              console.error("Count error:", err);
+              continue;
+            }
+            if (typeof count === "number") {
+              totalCount += count;
+            }
         }
       }
     }
@@ -457,7 +502,7 @@ export class RedisScanManager {
    * @param {boolean} [details=false] - 是否返回每个桶的详细数据量 (可能会比较大)
    * @returns {Promise<Object>} 统计信息对象
    */
-  async getDebugStats(details = false) {
+  async getDebugStats(details = false): Promise<DebugStats> {
     await this._ensureConnection();
 
     // 1. 使用 Pipeline 批量获取所有桶的大小 (ZCARD)
@@ -478,39 +523,41 @@ export class RedisScanManager {
     let minBucketSuffix = "";
     let maxBucketSuffix = "";
 
-    const bucketsData = {};
+    const bucketsData: Record<string, number> = {};
 
-    for (let i = 0; i < results.length; i++) {
-      const [err, count] = results[i];
-      const suffix = this.buckets[i];
-
-      if (err) {
-        console.error(`Error getting ZCARD for bucket ${suffix}:`, err);
-        continue;
-      }
-
-      // 确保 count 是数字
-      const size = typeof count === "number" ? count : 0;
+    if (results) {
+        for (let i = 0; i < results.length; i++) {
+            const [err, count] = results[i];
+            const suffix = this.buckets[i];
       
-      totalItems += size;
-
-      if (size === 0) {
-        emptyBuckets++;
-      }
-
-      if (size < minItems) {
-        minItems = size;
-        minBucketSuffix = suffix;
-      }
-
-      if (size > maxItems) {
-        maxItems = size;
-        maxBucketSuffix = suffix;
-      }
-
-      if (details) {
-        bucketsData[suffix] = size;
-      }
+            if (err) {
+              console.error(`Error getting ZCARD for bucket ${suffix}:`, err);
+              continue;
+            }
+      
+            // 确保 count 是数字
+            const size = typeof count === "number" ? count : 0;
+            
+            totalItems += size;
+      
+            if (size === 0) {
+              emptyBuckets++;
+            }
+      
+            if (size < minItems) {
+              minItems = size;
+              minBucketSuffix = suffix;
+            }
+      
+            if (size > maxItems) {
+              maxItems = size;
+              maxBucketSuffix = suffix;
+            }
+      
+            if (details) {
+              bucketsData[suffix] = size;
+            }
+          }
     }
 
     // 如果所有桶都为空，minItems 重置为 0
@@ -522,7 +569,7 @@ export class RedisScanManager {
     const avgItems = totalBuckets > 0 ? totalItems / totalBuckets : 0;
 
     // 3. 构建返回对象
-    const stats = {
+    const stats: DebugStats = {
       meta: {
         hashChars: this.hashChars,
         totalBuckets: totalBuckets,

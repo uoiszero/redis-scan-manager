@@ -5,14 +5,16 @@
   "description": "High-performance Redis secondary index manager with hash sharding",
   "main": "dist/index.cjs",
   "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
       "require": "./dist/index.cjs"
     }
   },
   "scripts": {
-    "build": "node build.js",
+    "build": "tsup",
     "prepublishOnly": "npm run build"
   },
   "files": [
@@ -27,7 +29,10 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "esbuild": "^0.27.2"
+    "@types/node": "^25.3.0",
+    "esbuild": "^0.27.2",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3"
   },
   "dependencies": {
     "ioredis": "^5.9.2"

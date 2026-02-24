@@ -1,39 +1,13 @@
-var __create = Object.create;
-var __defProp = Object.defineProperty;
-var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
-var __getOwnPropNames = Object.getOwnPropertyNames;
-var __getProtoOf = Object.getPrototypeOf;
-var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __export = (target, all) => {
-  for (var name in all)
-    __defProp(target, name, { get: all[name], enumerable: true });
-};
-var __copyProps = (to, from, except, desc) => {
-  if (from && typeof from === "object" || typeof from === "function") {
-    for (let key of __getOwnPropNames(from))
-      if (!__hasOwnProp.call(to, key) && key !== except)
-        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
-  }
-  return to;
-};
-var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
-  // If the importer is in node compatibility mode or this is not an ESM
-  // file that has been converted to a CommonJS file using a Babel-
-  // compatible transform (i.e. "__esModule" has not been set), then set
-  // "default" to the CommonJS "module.exports" for node compatibility.
-  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
-  mod
-));
-var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+'use strict';
 
-// redis_scan_manager.js
-var redis_scan_manager_exports = {};
-__export(redis_scan_manager_exports, {
-  RedisScanManager: () => RedisScanManager
-});
-module.exports = __toCommonJS(redis_scan_manager_exports);
-var import_ioredis = __toESM(require("ioredis"), 1);
-var import_crypto = __toESM(require("crypto"), 1);
+var ioredis = require('ioredis');
+var crypto = require('crypto');
+
+function _interopDefault (e) { return e && e.__esModule ? e : { default: e }; }
+
+var crypto__default = /*#__PURE__*/_interopDefault(crypto);
+
+// src/index.ts
 var RedisScanManager = class {
   /**
    * @param {Object} options
@@ -109,12 +83,11 @@ var RedisScanManager = class {
   async _ensureConnection() {
     if (!this.redis) {
       if (this.isCluster) {
-        this.redis = new import_ioredis.default.Cluster(this.redisConfig);
+        this.redis = new ioredis.Redis.Cluster(this.redisConfig);
       } else {
-        this.redis = new import_ioredis.default(this.redisConfig);
+        this.redis = new ioredis.Redis(this.redisConfig);
       }
       this._initLuaScripts();
-    } else if (this.redis.status === "end" || this.redis.status === "close" || this.redis.status === "wait") {
     }
   }
   /**
@@ -162,7 +135,7 @@ var RedisScanManager = class {
    * @returns {string} 桶的完整 Key (prefix + hashSuffix)
    */
   _getBucketKey(key) {
-    const hash = import_crypto.default.createHash("md5").update(key).digest("hex");
+    const hash = crypto__default.default.createHash("md5").update(key).digest("hex");
     const bucketSuffix = hash.substring(0, this.hashChars);
     return this._getBucketName(bucketSuffix);
   }
@@ -244,15 +217,18 @@ var RedisScanManager = class {
    * @returns {Promise<void>}
    */
   async del(keys) {
+    let keysArray = [];
     if (typeof keys === "string") {
-      keys = [keys];
+      keysArray = [keys];
+    } else if (Array.isArray(keys)) {
+      keysArray = keys;
     }
-    if (!Array.isArray(keys) || keys.length === 0) {
+    if (keysArray.length === 0) {
       return;
     }
     const BATCH_SIZE = 1e3;
-    for (let i = 0; i < keys.length; i += BATCH_SIZE) {
-      const batchKeys = keys.slice(i, i + BATCH_SIZE);
+    for (let i = 0; i < keysArray.length; i += BATCH_SIZE) {
+      const batchKeys = keysArray.slice(i, i + BATCH_SIZE);
       if (this.isCluster) {
         const pipeline = this.redis.pipeline();
         for (const key of batchKeys) {
@@ -269,7 +245,7 @@ var RedisScanManager = class {
         }
         await this._execAtomic(
           "mDelIndex",
-          [keysAndBuckets.length, ...keysAndBuckets],
+          [String(keysAndBuckets.length), ...keysAndBuckets],
           [],
           (pipeline) => {
             for (let j = 0; j < keysAndBuckets.length; j += 2) {
@@ -312,13 +288,15 @@ var RedisScanManager = class {
       );
       const batchResults2 = await pipeline.exec();
       let batchKeys = [];
-      for (const [err, keys] of batchResults2) {
-        if (err) {
-          console.error("Scan error:", err);
-          continue;
-        }
-        if (keys && keys.length > 0) {
-          batchKeys.push(...keys);
+      if (batchResults2) {
+        for (const [err, keys] of batchResults2) {
+          if (err) {
+            console.error("Scan error:", err);
+            continue;
+          }
+          if (keys && keys.length > 0) {
+            batchKeys.push(...keys);
+          }
         }
       }
       if (batchKeys.length > 0) {
@@ -372,13 +350,15 @@ var RedisScanManager = class {
     }
     const allBatchResults = await Promise.all(promises);
     for (const batchResults of allBatchResults) {
-      for (const [err, count] of batchResults) {
-        if (err) {
-          console.error("Count error:", err);
-          continue;
-        }
-        if (typeof count === "number") {
-          totalCount += count;
+      if (batchResults) {
+        for (const [err, count] of batchResults) {
+          if (err) {
+            console.error("Count error:", err);
+            continue;
+          }
+          if (typeof count === "number") {
+            totalCount += count;
+          }
         }
       }
     }
@@ -407,28 +387,30 @@ var RedisScanManager = class {
     let minBucketSuffix = "";
     let maxBucketSuffix = "";
     const bucketsData = {};
-    for (let i = 0; i < results.length; i++) {
-      const [err, count] = results[i];
-      const suffix = this.buckets[i];
-      if (err) {
-        console.error(`Error getting ZCARD for bucket ${suffix}:`, err);
-        continue;
-      }
-      const size = typeof count === "number" ? count : 0;
-      totalItems += size;
-      if (size === 0) {
-        emptyBuckets++;
-      }
-      if (size < minItems) {
-        minItems = size;
-        minBucketSuffix = suffix;
-      }
-      if (size > maxItems) {
-        maxItems = size;
-        maxBucketSuffix = suffix;
-      }
-      if (details) {
-        bucketsData[suffix] = size;
+    if (results) {
+      for (let i = 0; i < results.length; i++) {
+        const [err, count] = results[i];
+        const suffix = this.buckets[i];
+        if (err) {
+          console.error(`Error getting ZCARD for bucket ${suffix}:`, err);
+          continue;
+        }
+        const size = typeof count === "number" ? count : 0;
+        totalItems += size;
+        if (size === 0) {
+          emptyBuckets++;
+        }
+        if (size < minItems) {
+          minItems = size;
+          minBucketSuffix = suffix;
+        }
+        if (size > maxItems) {
+          maxItems = size;
+          maxBucketSuffix = suffix;
+        }
+        if (details) {
+          bucketsData[suffix] = size;
+        }
       }
     }
     if (totalItems === 0) {
@@ -460,7 +442,7 @@ var RedisScanManager = class {
     return stats;
   }
 };
-// Annotate the CommonJS export names for ESM import in node:
-0 && (module.exports = {
-  RedisScanManager
-});
+
+exports.RedisScanManager = RedisScanManager;
+//# sourceMappingURL=index.cjs.map
+//# sourceMappingURL=index.cjs.map
