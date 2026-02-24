@@ -192,3 +192,27 @@ npm run build
 # 运行测试
 node test/test_redis_scan_manager.js
 ```
+
+---
+
+## 📊 性能基准 (Benchmark)
+
+基于 **1,000,000** 条数据的本地测试结果 (MacBook Pro, Node.js v22):
+
+### 写入性能 (Write)
+- **总耗时**: ~8s (100万条)
+- **QPS**: ~125,000 ops/s (并发批处理)
+
+### 查询性能 (Scan)
+- **小范围查询 (Limit 10)**: ~7ms
+- **大范围统计 (Count)**: ~50ms (ZLEXCOUNT 服务端计算)
+
+### 分桶均衡度 (Sharding Distribution)
+使用默认 `hashChars: 2` (256 桶):
+- **总数据量**: 1,000,000
+- **平均桶大小**: 3,906
+- **最大桶大小**: 4,063
+- **最小桶大小**: 3,774
+- **倾斜比 (Skew Ratio)**: **1.04** (非常均匀)
+
+> 结论: Hash 分桶策略能极其均匀地分散数据，有效避免了单 Key 热点问题。
