@@ -99,13 +99,13 @@ declare class RedisScanManager {
      */
     private _execAtomic;
     /**
-     * 内部方法：构建批处理 Pipeline
+     * 内部方法：批量执行命令 (自动适配 Cluster 和 Pipeline)
      * @private
      * @param {Array<string>} bucketBatch - 桶后缀批次
-     * @param {Function} callback - (pipeline, bucketKey) => void
-     * @returns {Object} pipeline 对象
+     * @param {Function} commandFn - (client, bucketKey) => Promise | void
+     * @returns {Promise<Array<[Error|null, any]>>}
      */
-    private _buildBatchPipeline;
+    private _runBatchCommand;
     /**
      * 添加或更新数据及其索引 (原子操作)
      *
@@ -139,10 +139,11 @@ declare class RedisScanManager {
      * @param {string} startKey - 起始 Key (包含)，例如 "user:1000"
      * @param {string} [endKey] - 结束 Key (包含)。如果未提供，必须保证 startKey 能推导出前缀范围。
      * @param {number} [limit=100] - 返回结果的最大数量 (1-1000)。注意：这是全局 Limit。
+     * @param {boolean} [keysOnly=false] - 是否只返回 Key (Value 为 null)，用于快速扫描或删除
      * @returns {Promise<Array<string>>} Key 和 Value 交替排列的扁平数组 [key1, val1, key2, val2...]
      * @throws {Error} 如果 limit 不合法或无法推导 endKey 范围时抛出异常
      */
-    scan(startKey: string, endKey?: string, limit?: number): Promise<string[]>;
+    scan(startKey: string, endKey?: string, limit?: number, keysOnly?: boolean): Promise<string[]>;
     /**
      * 统计范围内的数据总数
      *

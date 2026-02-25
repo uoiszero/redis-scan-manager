@@ -182,22 +182,36 @@ export class RedisScanManager {
   }
 
   /**
-   * 内部方法：构建批处理 Pipeline
+   * 内部方法：批量执行命令 (自动适配 Cluster 和 Pipeline)
    * @private
    * @param {Array<string>} bucketBatch - 桶后缀批次
-   * @param {Function} callback - (pipeline, bucketKey) => void
-   * @returns {Object} pipeline 对象
+   * @param {Function} commandFn - (client, bucketKey) => Promise | void
+   * @returns {Promise<Array<[Error|null, any]>>}
    */
-  private _buildBatchPipeline(
+  private async _runBatchCommand(
     bucketBatch: string[],
-    callback: (pipeline: ChainableCommander, bucketKey: string) => void
-  ) {
-    const pipeline = this.redis.pipeline();
-    for (const bucketSuffix of bucketBatch) {
-      const bucketKey = getBucketName(this.indexPrefix, bucketSuffix);
-      callback(pipeline, bucketKey);
+    commandFn: (client: any, bucketKey: string) => any
+  ): Promise<[Error | null, any][]> {
+    if (this.isCluster) {
+      const promises = bucketBatch.map(async (suffix) => {
+        const bucketKey = getBucketName(this.indexPrefix, suffix);
+        try {
+          const res = await commandFn(this.redis, bucketKey);
+          return [null, res] as [null, any];
+        } catch (err) {
+          return [err as Error, undefined] as [Error, any];
+        }
+      });
+      return Promise.all(promises);
+    } else {
+      const pipeline = this.redis.pipeline();
+      for (const suffix of bucketBatch) {
+        const bucketKey = getBucketName(this.indexPrefix, suffix);
+        commandFn(pipeline, bucketKey);
+      }
+      const results = await pipeline.exec();
+      return results || [];
     }
-    return pipeline;
   }
 
   /**
@@ -265,14 +279,14 @@ export class RedisScanManager {
       const batchKeys = keysArray.slice(i, i + BATCH_SIZE);
 
       if (this.isCluster) {
-        // Cluster 模式：使用 Pipeline 并发删除
-        const pipeline = this.redis.pipeline();
+        // Cluster 模式：并发执行，避免 CROSSSLOT 错误
+        const promises: Promise<any>[] = [];
         for (const key of batchKeys) {
           const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
-          pipeline.del(key);
-          pipeline.zrem(bucketKey, key);
+          promises.push(this.redis.del(key));
+          promises.push(this.redis.zrem(bucketKey, key));
         }
-        await pipeline.exec();
+        await Promise.all(promises);
       } else {
         const keysAndBuckets: string[] = [];
         for (const key of batchKeys) {
@@ -308,10 +322,11 @@ export class RedisScanManager {
    * @param {string} startKey - 起始 Key (包含)，例如 "user:1000"
    * @param {string} [endKey] - 结束 Key (包含)。如果未提供，必须保证 startKey 能推导出前缀范围。
    * @param {number} [limit=100] - 返回结果的最大数量 (1-1000)。注意：这是全局 Limit。
+   * @param {boolean} [keysOnly=false] - 是否只返回 Key (Value 为 null)，用于快速扫描或删除
    * @returns {Promise<Array<string>>} Key 和 Value 交替排列的扁平数组 [key1, val1, key2, val2...]
    * @throws {Error} 如果 limit 不合法或无法推导 endKey 范围时抛出异常
    */
-  async scan(startKey: string, endKey?: string, limit = 100) {
+  async scan(startKey: string, endKey?: string, limit = 100, keysOnly = false) {
     await this._ensureConnection();
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
       throw new Error("Limit must be an integer between 1 and 1000");
@@ -325,11 +340,19 @@ export class RedisScanManager {
 
     for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
       const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
-      const pipeline = this._buildBatchPipeline(bucketBatch, (p, bucketKey) => {
-        p.zrangebylex(bucketKey, lexStart, lexEnd, "LIMIT", 0, limit);
-      });
-
-      const batchResults = await pipeline.exec();
+      const batchResults = await this._runBatchCommand(
+        bucketBatch,
+        (client, bucketKey) => {
+          return client.zrangebylex(
+            bucketKey,
+            lexStart,
+            lexEnd,
+            "LIMIT",
+            0,
+            limit
+          );
+        }
+      );
 
       // 优化：分批合并 (Incremental Merge)
       let batchKeys: string[] = [];
@@ -361,11 +384,24 @@ export class RedisScanManager {
       return [];
     }
 
+    if (keysOnly) {
+      const result: string[] = [];
+      for (const key of allKeys) {
+        result.push(key, "");
+      }
+      return result;
+    }
+
     const valuePromises = [];
 
     for (let i = 0; i < allKeys.length; i += this.MGET_BATCH_SIZE) {
       const batchKeys = allKeys.slice(i, i + this.MGET_BATCH_SIZE);
-      valuePromises.push(this.redis.mget(batchKeys));
+      if (this.isCluster) {
+        // Cluster 模式下 MGET 无法跨 Slot，使用并发 GET 代替
+        valuePromises.push(Promise.all(batchKeys.map((k) => this.redis.get(k))));
+      } else {
+        valuePromises.push(this.redis.mget(batchKeys));
+      }
     }
 
     const batchResults = await Promise.all(valuePromises);
@@ -401,11 +437,11 @@ export class RedisScanManager {
 
     for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
       const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
-      const pipeline = this._buildBatchPipeline(bucketBatch, (p, bucketKey) => {
-        p.zlexcount(bucketKey, lexStart, lexEnd);
-      });
-
-      promises.push(pipeline.exec());
+      promises.push(
+        this._runBatchCommand(bucketBatch, (client, bucketKey) => {
+          return client.zlexcount(bucketKey, lexStart, lexEnd);
+        })
+      );
     }
 
     const allBatchResults = await Promise.all(promises);
@@ -438,14 +474,13 @@ export class RedisScanManager {
   async getDebugStats(details = false): Promise<DebugStats> {
     await this._ensureConnection();
 
-    // 1. 使用 Pipeline 批量获取所有桶的大小 (ZCARD)
-    const pipeline = this.redis.pipeline();
-    for (const suffix of this.buckets) {
-      const bucketKey = getBucketName(this.indexPrefix, suffix);
-      pipeline.zcard(bucketKey);
-    }
-
-    const results = await pipeline.exec();
+    // 1. 使用 Pipeline/Promise.all 批量获取所有桶的大小 (ZCARD)
+    const results = await this._runBatchCommand(
+      this.buckets,
+      (client, bucketKey) => {
+        return client.zcard(bucketKey);
+      }
+    );
 
     // 2. 统计分析
     let totalItems = 0;

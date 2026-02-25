@@ -143,19 +143,33 @@ var RedisScanManager = class {
     }
   }
   /**
-   * 内部方法：构建批处理 Pipeline
+   * 内部方法：批量执行命令 (自动适配 Cluster 和 Pipeline)
    * @private
    * @param {Array<string>} bucketBatch - 桶后缀批次
-   * @param {Function} callback - (pipeline, bucketKey) => void
-   * @returns {Object} pipeline 对象
+   * @param {Function} commandFn - (client, bucketKey) => Promise | void
+   * @returns {Promise<Array<[Error|null, any]>>}
    */
-  _buildBatchPipeline(bucketBatch, callback) {
-    const pipeline = this.redis.pipeline();
-    for (const bucketSuffix of bucketBatch) {
-      const bucketKey = getBucketName(this.indexPrefix, bucketSuffix);
-      callback(pipeline, bucketKey);
+  async _runBatchCommand(bucketBatch, commandFn) {
+    if (this.isCluster) {
+      const promises = bucketBatch.map(async (suffix) => {
+        const bucketKey = getBucketName(this.indexPrefix, suffix);
+        try {
+          const res = await commandFn(this.redis, bucketKey);
+          return [null, res];
+        } catch (err) {
+          return [err, void 0];
+        }
+      });
+      return Promise.all(promises);
+    } else {
+      const pipeline = this.redis.pipeline();
+      for (const suffix of bucketBatch) {
+        const bucketKey = getBucketName(this.indexPrefix, suffix);
+        commandFn(pipeline, bucketKey);
+      }
+      const results = await pipeline.exec();
+      return results || [];
     }
-    return pipeline;
   }
   /**
    * 添加或更新数据及其索引 (原子操作)
@@ -212,13 +226,13 @@ var RedisScanManager = class {
     for (let i = 0; i < keysArray.length; i += BATCH_SIZE) {
       const batchKeys = keysArray.slice(i, i + BATCH_SIZE);
       if (this.isCluster) {
-        const pipeline = this.redis.pipeline();
+        const promises = [];
         for (const key of batchKeys) {
           const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
-          pipeline.del(key);
-          pipeline.zrem(bucketKey, key);
+          promises.push(this.redis.del(key));
+          promises.push(this.redis.zrem(bucketKey, key));
         }
-        await pipeline.exec();
+        await Promise.all(promises);
       } else {
         const keysAndBuckets = [];
         for (const key of batchKeys) {
@@ -250,10 +264,11 @@ var RedisScanManager = class {
    * @param {string} startKey - 起始 Key (包含)，例如 "user:1000"
    * @param {string} [endKey] - 结束 Key (包含)。如果未提供，必须保证 startKey 能推导出前缀范围。
    * @param {number} [limit=100] - 返回结果的最大数量 (1-1000)。注意：这是全局 Limit。
+   * @param {boolean} [keysOnly=false] - 是否只返回 Key (Value 为 null)，用于快速扫描或删除
    * @returns {Promise<Array<string>>} Key 和 Value 交替排列的扁平数组 [key1, val1, key2, val2...]
    * @throws {Error} 如果 limit 不合法或无法推导 endKey 范围时抛出异常
    */
-  async scan(startKey, endKey, limit = 100) {
+  async scan(startKey, endKey, limit = 100, keysOnly = false) {
     await this._ensureConnection();
     if (!Number.isInteger(limit) || limit < 1 || limit > 1e3) {
       throw new Error("Limit must be an integer between 1 and 1000");
@@ -262,10 +277,19 @@ var RedisScanManager = class {
     let allKeys = [];
     for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
       const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
-      const pipeline = this._buildBatchPipeline(bucketBatch, (p, bucketKey) => {
-        p.zrangebylex(bucketKey, lexStart, lexEnd, "LIMIT", 0, limit);
-      });
-      const batchResults2 = await pipeline.exec();
+      const batchResults2 = await this._runBatchCommand(
+        bucketBatch,
+        (client, bucketKey) => {
+          return client.zrangebylex(
+            bucketKey,
+            lexStart,
+            lexEnd,
+            "LIMIT",
+            0,
+            limit
+          );
+        }
+      );
       let batchKeys = [];
       if (batchResults2) {
         for (const [err, keys] of batchResults2) {
@@ -289,10 +313,21 @@ var RedisScanManager = class {
     if (allKeys.length === 0) {
       return [];
     }
+    if (keysOnly) {
+      const result2 = [];
+      for (const key of allKeys) {
+        result2.push(key, "");
+      }
+      return result2;
+    }
     const valuePromises = [];
     for (let i = 0; i < allKeys.length; i += this.MGET_BATCH_SIZE) {
       const batchKeys = allKeys.slice(i, i + this.MGET_BATCH_SIZE);
-      valuePromises.push(this.redis.mget(batchKeys));
+      if (this.isCluster) {
+        valuePromises.push(Promise.all(batchKeys.map((k) => this.redis.get(k))));
+      } else {
+        valuePromises.push(this.redis.mget(batchKeys));
+      }
     }
     const batchResults = await Promise.all(valuePromises);
     const values = batchResults.flat();
@@ -319,10 +354,11 @@ var RedisScanManager = class {
     const promises = [];
     for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
       const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
-      const pipeline = this._buildBatchPipeline(bucketBatch, (p, bucketKey) => {
-        p.zlexcount(bucketKey, lexStart, lexEnd);
-      });
-      promises.push(pipeline.exec());
+      promises.push(
+        this._runBatchCommand(bucketBatch, (client, bucketKey) => {
+          return client.zlexcount(bucketKey, lexStart, lexEnd);
+        })
+      );
     }
     const allBatchResults = await Promise.all(promises);
     for (const batchResults of allBatchResults) {
@@ -350,12 +386,12 @@ var RedisScanManager = class {
    */
   async getDebugStats(details = false) {
     await this._ensureConnection();
-    const pipeline = this.redis.pipeline();
-    for (const suffix of this.buckets) {
-      const bucketKey = getBucketName(this.indexPrefix, suffix);
-      pipeline.zcard(bucketKey);
-    }
-    const results = await pipeline.exec();
+    const results = await this._runBatchCommand(
+      this.buckets,
+      (client, bucketKey) => {
+        return client.zcard(bucketKey);
+      }
+    );
     let totalItems = 0;
     let minItems = Number.MAX_SAFE_INTEGER;
     let maxItems = 0;
