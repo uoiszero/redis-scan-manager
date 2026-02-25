@@ -393,63 +393,62 @@ export class RedisScanManager {
       const batchKeys = keysArray.slice(i, i + BATCH_SIZE);
       log(`[Batch Delete] keys in Array: ${keysArray.length}`);
       if (this.isCluster) {
-        // Cluster 模式：按节点分组 Pipeline，减少 RTT
-        const pipelines = new Map<any, ChainableCommander>();
-        const individualPromises: Promise<any>[] = [];
+        // 优化2+3：按 (node, bucketKey) 二元组分组，减少 Pipeline 数量
+        // 如果 keyNode === bucketNode，合并到同一个 Pipeline
+        const pipelines = new Map<
+          string,
+          { node: any; pipeline: ChainableCommander }
+        >();
 
-        const getPipeline = (node: any) => {
-          if (!pipelines.has(node)) {
-            pipelines.set(node, node.pipeline());
+        const getPipelineKey = (node: any, bucketKey: string) => {
+          return `${node.options.host}:${node.options.port}:${bucketKey}`;
+        };
+
+        const getOrCreatePipeline = (node: any, bucketKey: string) => {
+          const key = getPipelineKey(node, bucketKey);
+          if (!pipelines.has(key)) {
+            pipelines.set(key, { node, pipeline: node.pipeline() });
           }
-          return pipelines.get(node)!;
+          return pipelines.get(key)!.pipeline;
         };
 
         for (const key of batchKeys) {
           const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
           const keyNode = this._getNode(key);
           const bucketNode = this._getNode(bucketKey);
-          const keyNodeHost = keyNode?.options?.host || "unknown";
-          const bucketNodeHost = bucketNode?.options?.host || "unknown";
           const sameNode = keyNode && bucketNode && keyNode === bucketNode;
 
-          log(
-            `[Del] Key: ${key}, Bucket: ${bucketKey}, KeyNode: ${keyNodeHost}, BucketNode: ${bucketNodeHost}, SameNode: ${sameNode}`
-          );
-
-          try {
+          if (sameNode && keyNode) {
+            // 优化2：同节点合并到一个 Pipeline
+            const pipeline = getOrCreatePipeline(keyNode, bucketKey);
+            pipeline.del(key);
+            pipeline.zrem(bucketKey, key);
+          } else {
+            // 跨节点：分别执行
             if (keyNode) {
-              getPipeline(keyNode).del(key);
-            } else {
-              individualPromises.push(this.redis.del(key));
+              getOrCreatePipeline(keyNode, key).del(key);
             }
-          } catch (e) {
-            individualPromises.push(this.redis.del(key));
-          }
-
-          try {
             if (bucketNode) {
-              getPipeline(bucketNode).zrem(bucketKey, key);
-            } else {
-              individualPromises.push(this.redis.zrem(bucketKey, key));
+              getOrCreatePipeline(bucketNode, bucketKey).zrem(bucketKey, key);
             }
-          } catch (e) {
-            individualPromises.push(this.redis.zrem(bucketKey, key));
           }
         }
 
         // Debug: Log request count
+        const pipelineCount = pipelines.size;
         log(
-          `[Batch Delete] Keys: ${batchKeys.length}, Nodes (Pipelines): ${pipelines.size}, Individual Requests: ${individualPromises.length}`
+          `[Batch Delete] Keys: ${batchKeys.length}, Pipelines: ${pipelineCount}`
         );
 
         const execStart = Date.now();
-        await Promise.all([
-          ...Array.from(pipelines.values()).map(p => p.exec()),
-          ...individualPromises
-        ]);
+        await Promise.all(
+          Array.from(pipelines.values()).map(p => p.pipeline.exec())
+        );
         const batchDuration = Date.now() - batchStart;
         const execDuration = Date.now() - execStart;
-        console.log(`[Del] Batch delete completed in ${batchDuration}ms (Pipeline exec: ${execDuration}ms)`);
+        console.log(
+          `[Del] Batch delete completed in ${batchDuration}ms (Pipeline exec: ${execDuration}ms, Pipelines: ${pipelineCount})`
+        );
       } else {
         const keysAndBuckets: string[] = [];
         for (const key of batchKeys) {
