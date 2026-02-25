@@ -130,13 +130,13 @@ export class RedisScanManager {
       if (typeof (this.redis as any).addIndex !== "function") {
         (this.redis as any).defineCommand("addIndex", {
           numberOfKeys: 2,
-          lua: ADD_INDEX_SCRIPT,
+          lua: ADD_INDEX_SCRIPT
         });
       }
 
       if (typeof (this.redis as any).mDelIndex !== "function") {
         (this.redis as any).defineCommand("mDelIndex", {
-          lua: M_DEL_INDEX_SCRIPT,
+          lua: M_DEL_INDEX_SCRIPT
         });
       }
     }
@@ -230,10 +230,10 @@ export class RedisScanManager {
       const promises = Array.from(nodesMap.entries()).map(
         async ([node, { keys, indices }]) => {
           const pipeline = node.pipeline();
-          keys.forEach((bucketKey) => {
+          keys.forEach(bucketKey => {
             commandFn(pipeline, bucketKey);
           });
-          
+
           try {
             const pipelineResults = await pipeline.exec();
             if (pipelineResults) {
@@ -241,11 +241,14 @@ export class RedisScanManager {
                 results[indices[i]] = res;
               });
             } else {
-               // Should not happen for successful exec
-               indices.forEach(idx => results[idx] = [new Error("Pipeline returned null"), null]);
+              // Should not happen for successful exec
+              indices.forEach(
+                idx =>
+                  (results[idx] = [new Error("Pipeline returned null"), null])
+              );
             }
           } catch (err) {
-            indices.forEach((idx) => {
+            indices.forEach(idx => {
               results[idx] = [err, null];
             });
           }
@@ -253,7 +256,9 @@ export class RedisScanManager {
       );
 
       // Debug: Log request count
-      log(`[Batch Command] Buckets: ${bucketBatch.length}, Nodes (Pipelines): ${nodesMap.size}, Individual Requests: 0`);
+      log(
+        `[Batch Command] Buckets: ${bucketBatch.length}, Nodes (Pipelines): ${nodesMap.size}, Individual Requests: 0`
+      );
 
       await Promise.all(promises);
       return results;
@@ -282,38 +287,41 @@ export class RedisScanManager {
     const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
 
     if (this.isCluster) {
-      // Cluster 模式：使用 Pipeline 分组优化，虽然无法保证跨 Key 原子性，但可以减少网络开销
       const keyNode = this._getNode(key);
       const bucketNode = this._getNode(bucketKey);
+      const keyNodeHost = keyNode?.options?.host || "unknown";
+      const bucketNodeHost = bucketNode?.options?.host || "unknown";
+      const sameNode = keyNode && bucketNode && keyNode === bucketNode;
 
-      // 优化：如果数据 Key 和 索引 Key 恰好在同一个节点 (虽然 Slot 可能不同)，我们可以使用 Pipeline 打包发送，减少 RTT
-      if (keyNode && bucketNode && keyNode === bucketNode) {
-        // 使用该节点的 pipeline
+      log(
+        `[Add] Key: ${key}, Bucket: ${bucketKey}, KeyNode: ${keyNodeHost}, BucketNode: ${bucketNodeHost}, SameNode: ${sameNode}`
+      );
+
+      if (sameNode) {
         const pipeline = keyNode.pipeline();
         pipeline.set(key, value);
         pipeline.zadd(bucketKey, 0, key);
         await pipeline.exec();
       } else {
-        // 不在同一个节点，只能并发发送
         const promises = [];
-        
-        // 1. SET key value
+
         if (keyNode) {
-            // 使用 key 所在节点的客户端直接发送命令，避免 ioredis 内部再次路由
-            promises.push(keyNode.set(key, value));
+          promises.push(keyNode.set(key, value));
         } else {
-            promises.push(this.redis.set(key, value));
+          promises.push(this.redis.set(key, value));
         }
 
-        // 2. ZADD bucketKey 0 key
         if (bucketNode) {
-            // 使用 bucket 所在节点的客户端直接发送命令
-            promises.push(bucketNode.zadd(bucketKey, 0, key));
+          promises.push(bucketNode.zadd(bucketKey, 0, key));
         } else {
-            promises.push(this.redis.zadd(bucketKey, 0, key));
+          promises.push(this.redis.zadd(bucketKey, 0, key));
         }
 
-        await Promise.all(promises);
+        try {
+          await Promise.all(promises);
+        } catch (e) {
+          console.error("Add Error", e);
+        }
       }
     } else {
       await this._execAtomic(
@@ -372,7 +380,17 @@ export class RedisScanManager {
         };
 
         for (const key of batchKeys) {
-          // 1. DEL key
+          const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
+          const keyNode = this._getNode(key);
+          const bucketNode = this._getNode(bucketKey);
+          const keyNodeHost = keyNode?.options?.host || "unknown";
+          const bucketNodeHost = bucketNode?.options?.host || "unknown";
+          const sameNode = keyNode && bucketNode && keyNode === bucketNode;
+
+          log(
+            `[Del] Key: ${key}, Bucket: ${bucketKey}, KeyNode: ${keyNodeHost}, BucketNode: ${bucketNodeHost}, SameNode: ${sameNode}`
+          );
+
           try {
             const keyNode = this._getNode(key);
             if (keyNode) {
@@ -384,8 +402,6 @@ export class RedisScanManager {
             individualPromises.push(this.redis.del(key));
           }
 
-          // 2. ZREM bucketKey key
-          const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
           try {
             const bucketNode = this._getNode(bucketKey);
             if (bucketNode) {
@@ -397,13 +413,15 @@ export class RedisScanManager {
             individualPromises.push(this.redis.zrem(bucketKey, key));
           }
         }
-        
+
         // Debug: Log request count
-        log(`[Batch Delete] Keys: ${batchKeys.length}, Nodes (Pipelines): ${pipelines.size}, Individual Requests: ${individualPromises.length}`);
+        log(
+          `[Batch Delete] Keys: ${batchKeys.length}, Nodes (Pipelines): ${pipelines.size}, Individual Requests: ${individualPromises.length}`
+        );
 
         await Promise.all([
-          ...Array.from(pipelines.values()).map((p) => p.exec()),
-          ...individualPromises,
+          ...Array.from(pipelines.values()).map(p => p.exec()),
+          ...individualPromises
         ]);
       } else {
         const keysAndBuckets: string[] = [];
@@ -516,7 +534,7 @@ export class RedisScanManager {
       const batchKeys = allKeys.slice(i, i + this.MGET_BATCH_SIZE);
       if (this.isCluster) {
         // Cluster 模式下 MGET 无法跨 Slot，使用并发 GET 代替
-        valuePromises.push(Promise.all(batchKeys.map((k) => this.redis.get(k))));
+        valuePromises.push(Promise.all(batchKeys.map(k => this.redis.get(k))));
       } else {
         valuePromises.push(this.redis.mget(batchKeys));
       }
@@ -659,19 +677,19 @@ export class RedisScanManager {
       meta: {
         hashChars: this.hashChars,
         totalBuckets: totalBuckets,
-        indexPrefix: this.indexPrefix,
+        indexPrefix: this.indexPrefix
       },
       stats: {
         totalItems: totalItems,
         avgItems: parseFloat(avgItems.toFixed(2)),
         minItems: minItems,
         maxItems: maxItems,
-        emptyBuckets: emptyBuckets,
+        emptyBuckets: emptyBuckets
       },
       outliers: {
         maxBucket: { suffix: maxBucketSuffix, count: maxItems },
-        minBucket: { suffix: minBucketSuffix, count: minItems },
-      },
+        minBucket: { suffix: minBucketSuffix, count: minItems }
+      }
     };
 
     if (details) {

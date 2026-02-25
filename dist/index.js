@@ -228,7 +228,11 @@ var RedisScanManager = class {
     if (this.isCluster) {
       const keyNode = this._getNode(key);
       const bucketNode = this._getNode(bucketKey);
-      if (keyNode && bucketNode && keyNode === bucketNode) {
+      const keyNodeHost = keyNode?.options?.host || "unknown";
+      const bucketNodeHost = bucketNode?.options?.host || "unknown";
+      const sameNode = keyNode && bucketNode && keyNode === bucketNode;
+      log(`[Add] Key: ${key}, Bucket: ${bucketKey}, KeyNode: ${keyNodeHost}, BucketNode: ${bucketNodeHost}, SameNode: ${sameNode}`);
+      if (sameNode) {
         const pipeline = keyNode.pipeline();
         pipeline.set(key, value);
         pipeline.zadd(bucketKey, 0, key);
@@ -245,7 +249,11 @@ var RedisScanManager = class {
         } else {
           promises.push(this.redis.zadd(bucketKey, 0, key));
         }
-        await Promise.all(promises);
+        try {
+          await Promise.all(promises);
+        } catch (e) {
+          console.error("Add Error", e);
+        }
       }
     } else {
       await this._execAtomic(
@@ -295,21 +303,27 @@ var RedisScanManager = class {
           return pipelines.get(node);
         };
         for (const key of batchKeys) {
+          const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
+          const keyNode = this._getNode(key);
+          const bucketNode = this._getNode(bucketKey);
+          const keyNodeHost = keyNode?.options?.host || "unknown";
+          const bucketNodeHost = bucketNode?.options?.host || "unknown";
+          const sameNode = keyNode && bucketNode && keyNode === bucketNode;
+          log(`[Del] Key: ${key}, Bucket: ${bucketKey}, KeyNode: ${keyNodeHost}, BucketNode: ${bucketNodeHost}, SameNode: ${sameNode}`);
           try {
-            const keyNode = this._getNode(key);
-            if (keyNode) {
-              getPipeline(keyNode).del(key);
+            const keyNode2 = this._getNode(key);
+            if (keyNode2) {
+              getPipeline(keyNode2).del(key);
             } else {
               individualPromises.push(this.redis.del(key));
             }
           } catch (e) {
             individualPromises.push(this.redis.del(key));
           }
-          const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
           try {
-            const bucketNode = this._getNode(bucketKey);
-            if (bucketNode) {
-              getPipeline(bucketNode).zrem(bucketKey, key);
+            const bucketNode2 = this._getNode(bucketKey);
+            if (bucketNode2) {
+              getPipeline(bucketNode2).zrem(bucketKey, key);
             } else {
               individualPromises.push(this.redis.zrem(bucketKey, key));
             }
