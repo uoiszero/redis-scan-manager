@@ -1,4 +1,6 @@
 import { Redis } from 'ioredis';
+import calculateSlot from 'cluster-key-slot';
+import debug from 'debug';
 import crypto from 'crypto';
 
 // src/RedisScanManager.ts
@@ -47,6 +49,7 @@ function getBucketKey(key, indexPrefix, hashChars) {
 }
 
 // src/RedisScanManager.ts
+var log = debug("redis-scan-manager");
 var RedisScanManager = class {
   /**
    * @param {Object} options
@@ -143,6 +146,18 @@ var RedisScanManager = class {
     }
   }
   /**
+   * 内部方法：获取 Key 对应的 Master 节点 (Cluster 模式)
+   * @private
+   */
+  _getNode(key) {
+    if (!this.isCluster) {
+      return this.redis;
+    }
+    const slot = calculateSlot(key);
+    const nodeKey = this.redis.slots[slot][0];
+    return this.redis.connectionPool.getInstanceByKey(nodeKey);
+  }
+  /**
    * 内部方法：批量执行命令 (自动适配 Cluster 和 Pipeline)
    * @private
    * @param {Array<string>} bucketBatch - 桶后缀批次
@@ -151,16 +166,43 @@ var RedisScanManager = class {
    */
   async _runBatchCommand(bucketBatch, commandFn) {
     if (this.isCluster) {
-      const promises = bucketBatch.map(async (suffix) => {
+      const nodesMap = /* @__PURE__ */ new Map();
+      bucketBatch.forEach((suffix, index) => {
         const bucketKey = getBucketName(this.indexPrefix, suffix);
-        try {
-          const res = await commandFn(this.redis, bucketKey);
-          return [null, res];
-        } catch (err) {
-          return [err, void 0];
+        const node = this._getNode(bucketKey);
+        if (!nodesMap.has(node)) {
+          nodesMap.set(node, { keys: [], indices: [] });
         }
+        const group = nodesMap.get(node);
+        group.keys.push(bucketKey);
+        group.indices.push(index);
       });
-      return Promise.all(promises);
+      const results = new Array(bucketBatch.length);
+      const promises = Array.from(nodesMap.entries()).map(
+        async ([node, { keys, indices }]) => {
+          const pipeline = node.pipeline();
+          keys.forEach((bucketKey) => {
+            commandFn(pipeline, bucketKey);
+          });
+          try {
+            const pipelineResults = await pipeline.exec();
+            if (pipelineResults) {
+              pipelineResults.forEach((res, i) => {
+                results[indices[i]] = res;
+              });
+            } else {
+              indices.forEach((idx) => results[idx] = [new Error("Pipeline returned null"), null]);
+            }
+          } catch (err) {
+            indices.forEach((idx) => {
+              results[idx] = [err, null];
+            });
+          }
+        }
+      );
+      log(`[Batch Command] Buckets: ${bucketBatch.length}, Nodes (Pipelines): ${nodesMap.size}, Individual Requests: 0`);
+      await Promise.all(promises);
+      return results;
     } else {
       const pipeline = this.redis.pipeline();
       for (const suffix of bucketBatch) {
@@ -184,10 +226,27 @@ var RedisScanManager = class {
   async add(key, value) {
     const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
     if (this.isCluster) {
-      await Promise.all([
-        this.redis.set(key, value),
-        this.redis.zadd(bucketKey, 0, key)
-      ]);
+      const keyNode = this._getNode(key);
+      const bucketNode = this._getNode(bucketKey);
+      if (keyNode && bucketNode && keyNode === bucketNode) {
+        const pipeline = keyNode.pipeline();
+        pipeline.set(key, value);
+        pipeline.zadd(bucketKey, 0, key);
+        await pipeline.exec();
+      } else {
+        const promises = [];
+        if (keyNode) {
+          promises.push(keyNode.set(key, value));
+        } else {
+          promises.push(this.redis.set(key, value));
+        }
+        if (bucketNode) {
+          promises.push(bucketNode.zadd(bucketKey, 0, key));
+        } else {
+          promises.push(this.redis.zadd(bucketKey, 0, key));
+        }
+        await Promise.all(promises);
+      }
     } else {
       await this._execAtomic(
         "addIndex",
@@ -226,13 +285,42 @@ var RedisScanManager = class {
     for (let i = 0; i < keysArray.length; i += BATCH_SIZE) {
       const batchKeys = keysArray.slice(i, i + BATCH_SIZE);
       if (this.isCluster) {
-        const promises = [];
+        const pipelines = /* @__PURE__ */ new Map();
+        const individualPromises = [];
+        const getPipeline = (node) => {
+          if (!pipelines.has(node)) {
+            pipelines.set(node, node.pipeline());
+          }
+          return pipelines.get(node);
+        };
         for (const key of batchKeys) {
+          try {
+            const keyNode = this._getNode(key);
+            if (keyNode) {
+              getPipeline(keyNode).del(key);
+            } else {
+              individualPromises.push(this.redis.del(key));
+            }
+          } catch (e) {
+            individualPromises.push(this.redis.del(key));
+          }
           const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
-          promises.push(this.redis.del(key));
-          promises.push(this.redis.zrem(bucketKey, key));
+          try {
+            const bucketNode = this._getNode(bucketKey);
+            if (bucketNode) {
+              getPipeline(bucketNode).zrem(bucketKey, key);
+            } else {
+              individualPromises.push(this.redis.zrem(bucketKey, key));
+            }
+          } catch (e) {
+            individualPromises.push(this.redis.zrem(bucketKey, key));
+          }
         }
-        await Promise.all(promises);
+        log(`[Batch Delete] Keys: ${batchKeys.length}, Nodes (Pipelines): ${pipelines.size}, Individual Requests: ${individualPromises.length}`);
+        await Promise.all([
+          ...Array.from(pipelines.values()).map((p) => p.exec()),
+          ...individualPromises
+        ]);
       } else {
         const keysAndBuckets = [];
         for (const key of batchKeys) {

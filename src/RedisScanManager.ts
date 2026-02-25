@@ -1,7 +1,11 @@
 import { Redis, type Cluster, type ChainableCommander } from "ioredis";
+import calculateSlot from "cluster-key-slot";
+import debug from "debug";
 import { ADD_INDEX_SCRIPT, M_DEL_INDEX_SCRIPT } from "./lua/scripts.js";
 import { inferRange } from "./utils/key-range.js";
 import { getBucketKey, getBucketName } from "./utils/sharding.js";
+
+const log = debug("redis-scan-manager");
 
 export interface RedisScanManagerOptions {
   redis: Redis | Cluster | any;
@@ -182,6 +186,19 @@ export class RedisScanManager {
   }
 
   /**
+   * 内部方法：获取 Key 对应的 Master 节点 (Cluster 模式)
+   * @private
+   */
+  private _getNode(key: string): any {
+    if (!this.isCluster) {
+      return this.redis;
+    }
+    const slot = calculateSlot(key);
+    const nodeKey = (this.redis as any).slots[slot][0];
+    return (this.redis as any).connectionPool.getInstanceByKey(nodeKey);
+  }
+
+  /**
    * 内部方法：批量执行命令 (自动适配 Cluster 和 Pipeline)
    * @private
    * @param {Array<string>} bucketBatch - 桶后缀批次
@@ -193,16 +210,53 @@ export class RedisScanManager {
     commandFn: (client: any, bucketKey: string) => any
   ): Promise<[Error | null, any][]> {
     if (this.isCluster) {
-      const promises = bucketBatch.map(async (suffix) => {
+      // Group by node to minimize RTT
+      const nodesMap = new Map<any, { keys: string[]; indices: number[] }>();
+
+      bucketBatch.forEach((suffix, index) => {
         const bucketKey = getBucketName(this.indexPrefix, suffix);
-        try {
-          const res = await commandFn(this.redis, bucketKey);
-          return [null, res] as [null, any];
-        } catch (err) {
-          return [err as Error, undefined] as [Error, any];
+        const node = this._getNode(bucketKey);
+
+        if (!nodesMap.has(node)) {
+          nodesMap.set(node, { keys: [], indices: [] });
         }
+        const group = nodesMap.get(node)!;
+        group.keys.push(bucketKey);
+        group.indices.push(index);
       });
-      return Promise.all(promises);
+
+      const results = new Array(bucketBatch.length);
+
+      const promises = Array.from(nodesMap.entries()).map(
+        async ([node, { keys, indices }]) => {
+          const pipeline = node.pipeline();
+          keys.forEach((bucketKey) => {
+            commandFn(pipeline, bucketKey);
+          });
+          
+          try {
+            const pipelineResults = await pipeline.exec();
+            if (pipelineResults) {
+              pipelineResults.forEach((res: any, i: number) => {
+                results[indices[i]] = res;
+              });
+            } else {
+               // Should not happen for successful exec
+               indices.forEach(idx => results[idx] = [new Error("Pipeline returned null"), null]);
+            }
+          } catch (err) {
+            indices.forEach((idx) => {
+              results[idx] = [err, null];
+            });
+          }
+        }
+      );
+
+      // Debug: Log request count
+      log(`[Batch Command] Buckets: ${bucketBatch.length}, Nodes (Pipelines): ${nodesMap.size}, Individual Requests: 0`);
+
+      await Promise.all(promises);
+      return results;
     } else {
       const pipeline = this.redis.pipeline();
       for (const suffix of bucketBatch) {
@@ -228,12 +282,39 @@ export class RedisScanManager {
     const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
 
     if (this.isCluster) {
-      // Cluster 模式：分步执行，无法保证原子性，但能避免 CROSSSLOT 错误
-      // 并行执行以提高效率
-      await Promise.all([
-        this.redis.set(key, value),
-        this.redis.zadd(bucketKey, 0, key),
-      ]);
+      // Cluster 模式：使用 Pipeline 分组优化，虽然无法保证跨 Key 原子性，但可以减少网络开销
+      const keyNode = this._getNode(key);
+      const bucketNode = this._getNode(bucketKey);
+
+      // 优化：如果数据 Key 和 索引 Key 恰好在同一个节点 (虽然 Slot 可能不同)，我们可以使用 Pipeline 打包发送，减少 RTT
+      if (keyNode && bucketNode && keyNode === bucketNode) {
+        // 使用该节点的 pipeline
+        const pipeline = keyNode.pipeline();
+        pipeline.set(key, value);
+        pipeline.zadd(bucketKey, 0, key);
+        await pipeline.exec();
+      } else {
+        // 不在同一个节点，只能并发发送
+        const promises = [];
+        
+        // 1. SET key value
+        if (keyNode) {
+            // 使用 key 所在节点的客户端直接发送命令，避免 ioredis 内部再次路由
+            promises.push(keyNode.set(key, value));
+        } else {
+            promises.push(this.redis.set(key, value));
+        }
+
+        // 2. ZADD bucketKey 0 key
+        if (bucketNode) {
+            // 使用 bucket 所在节点的客户端直接发送命令
+            promises.push(bucketNode.zadd(bucketKey, 0, key));
+        } else {
+            promises.push(this.redis.zadd(bucketKey, 0, key));
+        }
+
+        await Promise.all(promises);
+      }
     } else {
       await this._execAtomic(
         "addIndex",
@@ -279,14 +360,51 @@ export class RedisScanManager {
       const batchKeys = keysArray.slice(i, i + BATCH_SIZE);
 
       if (this.isCluster) {
-        // Cluster 模式：并发执行，避免 CROSSSLOT 错误
-        const promises: Promise<any>[] = [];
+        // Cluster 模式：按节点分组 Pipeline，减少 RTT
+        const pipelines = new Map<any, ChainableCommander>();
+        const individualPromises: Promise<any>[] = [];
+
+        const getPipeline = (node: any) => {
+          if (!pipelines.has(node)) {
+            pipelines.set(node, node.pipeline());
+          }
+          return pipelines.get(node)!;
+        };
+
         for (const key of batchKeys) {
+          // 1. DEL key
+          try {
+            const keyNode = this._getNode(key);
+            if (keyNode) {
+              getPipeline(keyNode).del(key);
+            } else {
+              individualPromises.push(this.redis.del(key));
+            }
+          } catch (e) {
+            individualPromises.push(this.redis.del(key));
+          }
+
+          // 2. ZREM bucketKey key
           const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
-          promises.push(this.redis.del(key));
-          promises.push(this.redis.zrem(bucketKey, key));
+          try {
+            const bucketNode = this._getNode(bucketKey);
+            if (bucketNode) {
+              getPipeline(bucketNode).zrem(bucketKey, key);
+            } else {
+              individualPromises.push(this.redis.zrem(bucketKey, key));
+            }
+          } catch (e) {
+            individualPromises.push(this.redis.zrem(bucketKey, key));
+          }
         }
-        await Promise.all(promises);
+        
+        // Debug: Log request count
+        log(`[Batch Delete] Keys: ${batchKeys.length}, Nodes (Pipelines): ${pipelines.size}, Individual Requests: ${individualPromises.length}`);
+
+        await Promise.all([
+          ...Array.from(pipelines.values()).map((p) => p.exec()),
+          ...individualPromises,
+        ]);
       } else {
         const keysAndBuckets: string[] = [];
         for (const key of batchKeys) {

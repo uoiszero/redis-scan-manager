@@ -99,6 +99,11 @@ declare class RedisScanManager {
      */
     private _execAtomic;
     /**
+     * 内部方法：获取 Key 对应的 Master 节点 (Cluster 模式)
+     * @private
+     */
+    private _getNode;
+    /**
      * 内部方法：批量执行命令 (自动适配 Cluster 和 Pipeline)
      * @private
      * @param {Array<string>} bucketBatch - 桶后缀批次

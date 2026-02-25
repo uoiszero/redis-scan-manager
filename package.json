@@ -44,6 +44,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@types/debug": "^4.1.12",
     "@types/node": "^25.3.0",
     "esbuild": "^0.27.2",
     "prettier": "^3.8.1",
@@ -51,6 +52,8 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "cluster-key-slot": "^1.1.2",
+    "debug": "^4.4.3",
     "ioredis": "^5.9.2"
   }
 }
