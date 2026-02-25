@@ -91,11 +91,11 @@ var RedisScanManager = class {
       throw new Error("options.hashChars must be 1 or 2");
     }
     this.hashChars = hashChars;
-    this.SCAN_BATCH_SIZE = options.scanBatchSize || 50;
+    const bucketCount = Math.pow(16, this.hashChars);
+    this.SCAN_BATCH_SIZE = options.scanBatchSize || bucketCount;
     this.MGET_BATCH_SIZE = options.mgetBatchSize || 200;
     this.buckets = [];
-    const maxVal = Math.pow(16, this.hashChars);
-    for (let i = 0; i < maxVal; i++) {
+    for (let i = 0; i < bucketCount; i++) {
       this.buckets.push(i.toString(16).padStart(this.hashChars, "0"));
     }
   }
@@ -199,7 +199,9 @@ var RedisScanManager = class {
                 results[indices[i]] = res;
               });
             } else {
-              indices.forEach((idx) => results[idx] = [new Error("Pipeline returned null"), null]);
+              indices.forEach(
+                (idx) => results[idx] = [new Error("Pipeline returned null"), null]
+              );
             }
           } catch (err) {
             indices.forEach((idx) => {
@@ -208,7 +210,9 @@ var RedisScanManager = class {
           }
         }
       );
-      log(`[Batch Command] Buckets: ${bucketBatch.length}, Nodes (Pipelines): ${nodesMap.size}, Individual Requests: 0`);
+      log(
+        `[Batch Command] Buckets: ${bucketBatch.length}, Nodes (Pipelines): ${nodesMap.size}, Individual Requests: 0`
+      );
       await Promise.all(promises);
       return results;
     } else {
@@ -239,7 +243,9 @@ var RedisScanManager = class {
       const keyNodeHost = keyNode?.options?.host || "unknown";
       const bucketNodeHost = bucketNode?.options?.host || "unknown";
       const sameNode = keyNode && bucketNode && keyNode === bucketNode;
-      log(`[Add] Key: ${key}, Bucket: ${bucketKey}, KeyNode: ${keyNodeHost}, BucketNode: ${bucketNodeHost}, SameNode: ${sameNode}`);
+      log(
+        `[Add] Key: ${key}, Bucket: ${bucketKey}, KeyNode: ${keyNodeHost}, BucketNode: ${bucketNodeHost}, SameNode: ${sameNode}`
+      );
       if (sameNode) {
         const pipeline = keyNode.pipeline();
         pipeline.set(key, value);
@@ -317,7 +323,9 @@ var RedisScanManager = class {
           const keyNodeHost = keyNode?.options?.host || "unknown";
           const bucketNodeHost = bucketNode?.options?.host || "unknown";
           const sameNode = keyNode && bucketNode && keyNode === bucketNode;
-          log(`[Del] Key: ${key}, Bucket: ${bucketKey}, KeyNode: ${keyNodeHost}, BucketNode: ${bucketNodeHost}, SameNode: ${sameNode}`);
+          log(
+            `[Del] Key: ${key}, Bucket: ${bucketKey}, KeyNode: ${keyNodeHost}, BucketNode: ${bucketNodeHost}, SameNode: ${sameNode}`
+          );
           try {
             const keyNode2 = this._getNode(key);
             if (keyNode2) {
@@ -339,7 +347,9 @@ var RedisScanManager = class {
             individualPromises.push(this.redis.zrem(bucketKey, key));
           }
         }
-        log(`[Batch Delete] Keys: ${batchKeys.length}, Nodes (Pipelines): ${pipelines.size}, Individual Requests: ${individualPromises.length}`);
+        log(
+          `[Batch Delete] Keys: ${batchKeys.length}, Nodes (Pipelines): ${pipelines.size}, Individual Requests: ${individualPromises.length}`
+        );
         await Promise.all([
           ...Array.from(pipelines.values()).map((p) => p.exec()),
           ...individualPromises
@@ -385,40 +395,35 @@ var RedisScanManager = class {
       throw new Error("Limit must be an integer between 1 and 1000");
     }
     const { lexStart, lexEnd } = inferRange(startKey, endKey);
+    const batchResults = await this._runBatchCommand(
+      this.buckets,
+      (client, bucketKey) => {
+        return client.zrangebylex(
+          bucketKey,
+          lexStart,
+          lexEnd,
+          "LIMIT",
+          0,
+          limit
+        );
+      }
+    );
     let allKeys = [];
-    for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
-      const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
-      const batchResults2 = await this._runBatchCommand(
-        bucketBatch,
-        (client, bucketKey) => {
-          return client.zrangebylex(
-            bucketKey,
-            lexStart,
-            lexEnd,
-            "LIMIT",
-            0,
-            limit
-          );
+    if (batchResults) {
+      for (const [err, keys] of batchResults) {
+        if (err) {
+          console.error("Scan error:", err);
+          continue;
         }
-      );
-      let batchKeys = [];
-      if (batchResults2) {
-        for (const [err, keys] of batchResults2) {
-          if (err) {
-            console.error("Scan error:", err);
-            continue;
-          }
-          if (keys && keys.length > 0) {
-            batchKeys.push(...keys);
-          }
+        if (keys && keys.length > 0) {
+          allKeys.push(...keys);
         }
       }
-      if (batchKeys.length > 0) {
-        allKeys = allKeys.concat(batchKeys);
-        allKeys.sort();
-        if (allKeys.length > limit) {
-          allKeys = allKeys.slice(0, limit);
-        }
+    }
+    if (allKeys.length > 0) {
+      allKeys.sort();
+      if (allKeys.length > limit) {
+        allKeys = allKeys.slice(0, limit);
       }
     }
     if (allKeys.length === 0) {
@@ -440,8 +445,8 @@ var RedisScanManager = class {
         valuePromises.push(this.redis.mget(batchKeys));
       }
     }
-    const batchResults = await Promise.all(valuePromises);
-    const values = batchResults.flat();
+    const mgetResults = await Promise.all(valuePromises);
+    const values = mgetResults.flat();
     const result = [];
     for (let i = 0; i < allKeys.length; i++) {
       result.push(allKeys[i], values[i]);
@@ -461,27 +466,21 @@ var RedisScanManager = class {
   async count(startKey, endKey) {
     await this._ensureConnection();
     const { lexStart, lexEnd } = inferRange(startKey, endKey);
+    const batchResults = await this._runBatchCommand(
+      this.buckets,
+      (client, bucketKey) => {
+        return client.zlexcount(bucketKey, lexStart, lexEnd);
+      }
+    );
     let totalCount = 0;
-    const promises = [];
-    for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
-      const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
-      promises.push(
-        this._runBatchCommand(bucketBatch, (client, bucketKey) => {
-          return client.zlexcount(bucketKey, lexStart, lexEnd);
-        })
-      );
-    }
-    const allBatchResults = await Promise.all(promises);
-    for (const batchResults of allBatchResults) {
-      if (batchResults) {
-        for (const [err, count] of batchResults) {
-          if (err) {
-            console.error("Count error:", err);
-            continue;
-          }
-          if (typeof count === "number") {
-            totalCount += count;
-          }
+    if (batchResults) {
+      for (const [err, count] of batchResults) {
+        if (err) {
+          console.error("Count error:", err);
+          continue;
+        }
+        if (typeof count === "number") {
+          totalCount += count;
         }
       }
     }

@@ -109,13 +109,15 @@ export class RedisScanManager {
     }
     this.hashChars = hashChars;
 
-    // 配置项: 批处理大小
-    this.SCAN_BATCH_SIZE = options.scanBatchSize || 50;
+    // 计算桶数量：hashChars=1 -> 16个桶，hashChars=2 -> 256个桶
+    const bucketCount = Math.pow(16, this.hashChars);
+
+    // 配置项: 批处理大小，默认等于桶数量，一次性发送所有桶
+    this.SCAN_BATCH_SIZE = options.scanBatchSize || bucketCount;
     this.MGET_BATCH_SIZE = options.mgetBatchSize || 200;
 
     this.buckets = [];
-    const maxVal = Math.pow(16, this.hashChars);
-    for (let i = 0; i < maxVal; i++) {
+    for (let i = 0; i < bucketCount; i++) {
       this.buckets.push(i.toString(16).padStart(this.hashChars, "0"));
     }
   }
@@ -470,49 +472,37 @@ export class RedisScanManager {
 
     const { lexStart, lexEnd } = inferRange(startKey, endKey);
 
-    // console.log(`[Scan Optimized] Range: [${startKey}, ${endKey || "AUTO"}], Limit: ${limit}`);
+    const batchResults = await this._runBatchCommand(
+      this.buckets,
+      (client, bucketKey) => {
+        return client.zrangebylex(
+          bucketKey,
+          lexStart,
+          lexEnd,
+          "LIMIT",
+          0,
+          limit
+        );
+      }
+    );
 
     let allKeys: string[] = [];
-
-    for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
-      const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
-      const batchResults = await this._runBatchCommand(
-        bucketBatch,
-        (client, bucketKey) => {
-          return client.zrangebylex(
-            bucketKey,
-            lexStart,
-            lexEnd,
-            "LIMIT",
-            0,
-            limit
-          );
+    if (batchResults) {
+      for (const [err, keys] of batchResults) {
+        if (err) {
+          console.error("Scan error:", err);
+          continue;
         }
-      );
-
-      // 优化：分批合并 (Incremental Merge)
-      let batchKeys: string[] = [];
-      if (batchResults) {
-        for (const [err, keys] of batchResults) {
-          if (err) {
-            console.error("Scan error:", err);
-            continue;
-          }
-          if (keys && (keys as string[]).length > 0) {
-            batchKeys.push(...(keys as string[]));
-          }
+        if (keys && (keys as string[]).length > 0) {
+          allKeys.push(...(keys as string[]));
         }
       }
+    }
 
-      if (batchKeys.length > 0) {
-        // 策略：将新的一批数据加入总集，然后立即排序并截断
-        // 这样内存中永远只保留 Limit + BatchSize*Limit 的数据量
-        allKeys = allKeys.concat(batchKeys);
-        allKeys.sort();
-
-        if (allKeys.length > limit) {
-          allKeys = allKeys.slice(0, limit);
-        }
+    if (allKeys.length > 0) {
+      allKeys.sort();
+      if (allKeys.length > limit) {
+        allKeys = allKeys.slice(0, limit);
       }
     }
 
@@ -540,8 +530,8 @@ export class RedisScanManager {
       }
     }
 
-    const batchResults = await Promise.all(valuePromises);
-    const values = batchResults.flat();
+    const mgetResults = await Promise.all(valuePromises);
+    const values = mgetResults.flat();
 
     // 拍平为 [key1, val1, key2, val2, ...]
     const result: string[] = [];
@@ -566,32 +556,22 @@ export class RedisScanManager {
 
     const { lexStart, lexEnd } = inferRange(startKey, endKey);
 
+    const batchResults = await this._runBatchCommand(
+      this.buckets,
+      (client, bucketKey) => {
+        return client.zlexcount(bucketKey, lexStart, lexEnd);
+      }
+    );
+
     let totalCount = 0;
-
-    // 并发执行所有批次
-    const promises = [];
-
-    for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
-      const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
-      promises.push(
-        this._runBatchCommand(bucketBatch, (client, bucketKey) => {
-          return client.zlexcount(bucketKey, lexStart, lexEnd);
-        })
-      );
-    }
-
-    const allBatchResults = await Promise.all(promises);
-
-    for (const batchResults of allBatchResults) {
-      if (batchResults) {
-        for (const [err, count] of batchResults) {
-          if (err) {
-            console.error("Count error:", err);
-            continue;
-          }
-          if (typeof count === "number") {
-            totalCount += count;
-          }
+    if (batchResults) {
+      for (const [err, count] of batchResults) {
+        if (err) {
+          console.error("Count error:", err);
+          continue;
+        }
+        if (typeof count === "number") {
+          totalCount += count;
         }
       }
     }
