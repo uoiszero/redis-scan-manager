@@ -1,10 +1,25 @@
 import Redis from "ioredis";
 import { RedisScanManager } from "../dist/index.js";
 
-const config = {
-  host: "localhost",
-  port: 6379
-};
+// const config = {
+//   host: "localhost",
+//   port: 6379
+// };
+
+const config = [
+  {
+    host: "192.168.5.9",
+    port: 51002
+  },
+  {
+    host: "192.168.5.10",
+    port: 51002
+  },
+  {
+    host: "192.168.5.11",
+    port: 51002
+  }
+];
 
 /**
  * 测试批量写入数据
@@ -223,8 +238,8 @@ async function cleanupData(manager, dataPrefix) {
       startKey = lastKey + "\x00";
     }
 
-    // Scan with limit (e.g. 500)
-    const batchData = await manager.scan(startKey, undefined, 500);
+    // Scan with limit (e.g. 500), keysOnly=true
+    const batchData = await manager.scan(startKey, undefined, 500, true);
 
     if (batchData.length === 0) {
       break;
@@ -285,6 +300,7 @@ async function runTest() {
   const redisOptions = {
     connectTimeout: 5000, // 5s timeout
     maxRetriesPerRequest: 1,
+    enableReadyCheck: false,
     retryStrategy: times => {
       if (times > 3) return null; // Stop retrying after 3 attempts
       return Math.min(times * 100, 2000);
@@ -338,8 +354,8 @@ async function runTest() {
       hashChars: 2
     });
 
-    const DATA_PREFIX = "test_user:";
-    const WRITE_COUNT = 1000000;
+    const DATA_PREFIX = "scan_test_user:";
+    const WRITE_COUNT = 10000;
 
     // 3. Write Data
     console.time("Write Data");
@@ -349,7 +365,6 @@ async function runTest() {
     // 调试：第一次写入后
     const stats1 = await manager.getDebugStats();
 
-    /*
     // 4. Scan and Verify Data
     console.time("Scan and Verify Data");
     await testScanData(manager, DATA_PREFIX, WRITE_COUNT);
@@ -364,7 +379,6 @@ async function runTest() {
 
     // 调试：删除一半并重写后
     const stats2 = await manager.getDebugStats();
-    */
 
     // 6. Cleanup Data
     console.time("Cleanup Data");
