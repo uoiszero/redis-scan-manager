@@ -64,6 +64,7 @@ declare class RedisScanManager {
     private SCAN_BATCH_SIZE;
     private MGET_BATCH_SIZE;
     private buckets;
+    private nodeCache;
     /**
      * @param {Object} options
      * @param {Redis|Object} [options.redis] - ioredis 实例，或 ioredis 构造函数参数 (配置对象)
@@ -103,6 +104,11 @@ declare class RedisScanManager {
      * @private
      */
     private _getNode;
+    /**
+     * 内部方法：清理节点缓存
+     * @private
+     */
+    private _clearNodeCache;
     /**
      * 内部方法：批量执行命令 (自动适配 Cluster 和 Pipeline)
      * @private

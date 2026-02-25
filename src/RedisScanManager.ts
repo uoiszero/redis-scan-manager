@@ -67,6 +67,7 @@ export class RedisScanManager {
   private SCAN_BATCH_SIZE: number;
   private MGET_BATCH_SIZE: number;
   private buckets: string[];
+  private nodeCache: Map<string, any>;
 
   /**
    * @param {Object} options
@@ -120,6 +121,8 @@ export class RedisScanManager {
     for (let i = 0; i < bucketCount; i++) {
       this.buckets.push(i.toString(16).padStart(this.hashChars, "0"));
     }
+
+    this.nodeCache = new Map();
   }
 
   /**
@@ -195,9 +198,24 @@ export class RedisScanManager {
     if (!this.isCluster) {
       return this.redis;
     }
+
+    if (this.nodeCache.has(key)) {
+      return this.nodeCache.get(key);
+    }
+
     const slot = calculateSlot(key);
     const nodeKey = (this.redis as any).slots[slot][0];
-    return (this.redis as any).connectionPool.getInstanceByKey(nodeKey);
+    const node = (this.redis as any).connectionPool.getInstanceByKey(nodeKey);
+    this.nodeCache.set(key, node);
+    return node;
+  }
+
+  /**
+   * 内部方法：清理节点缓存
+   * @private
+   */
+  private _clearNodeCache() {
+    this.nodeCache.clear();
   }
 
   /**
@@ -351,6 +369,8 @@ export class RedisScanManager {
    * @returns {Promise<void>}
    */
   async del(keys: string | string[]) {
+    this._clearNodeCache();
+
     // 兼容单字符串参数
     let keysArray: string[] = [];
     if (typeof keys === "string") {
@@ -363,10 +383,13 @@ export class RedisScanManager {
       return;
     }
 
+    console.log(`[Del] Total keys to delete: ${keysArray.length}`);
+
     // Fix: Process in batches to avoid stack overflow
     const BATCH_SIZE = 1000;
 
     for (let i = 0; i < keysArray.length; i += BATCH_SIZE) {
+      const batchStart = Date.now();
       const batchKeys = keysArray.slice(i, i + BATCH_SIZE);
       log(`[Batch Delete] keys in Array: ${keysArray.length}`);
       if (this.isCluster) {
@@ -394,7 +417,6 @@ export class RedisScanManager {
           );
 
           try {
-            const keyNode = this._getNode(key);
             if (keyNode) {
               getPipeline(keyNode).del(key);
             } else {
@@ -405,7 +427,6 @@ export class RedisScanManager {
           }
 
           try {
-            const bucketNode = this._getNode(bucketKey);
             if (bucketNode) {
               getPipeline(bucketNode).zrem(bucketKey, key);
             } else {
@@ -421,10 +442,14 @@ export class RedisScanManager {
           `[Batch Delete] Keys: ${batchKeys.length}, Nodes (Pipelines): ${pipelines.size}, Individual Requests: ${individualPromises.length}`
         );
 
+        const execStart = Date.now();
         await Promise.all([
           ...Array.from(pipelines.values()).map(p => p.exec()),
           ...individualPromises
         ]);
+        const batchDuration = Date.now() - batchStart;
+        const execDuration = Date.now() - execStart;
+        console.log(`[Del] Batch delete completed in ${batchDuration}ms (Pipeline exec: ${execDuration}ms)`);
       } else {
         const keysAndBuckets: string[] = [];
         for (const key of batchKeys) {
