@@ -1,12 +1,17 @@
 import Redis from "ioredis";
 import { RedisScanManager } from "../dist/index.js";
 
+const singletonConfig = {
+  host: "localhost",
+  port: 6379
+};
+
 // const config = {
 //   host: "localhost",
 //   port: 6379
 // };
 
-const config = [
+const clusterConfig = [
   {
     host: "192.168.5.9",
     port: 51002
@@ -20,6 +25,10 @@ const config = [
     port: 51002
   }
 ];
+
+const mode = process.env.TEST_MODE || "singleton";
+console.log(`Running test in ${mode} mode...`);
+const config = mode === "cluster" ? clusterConfig : singletonConfig;
 
 /**
  * 测试批量写入数据
@@ -385,7 +394,6 @@ async function runTest() {
     await cleanupData(manager, DATA_PREFIX);
     console.timeEnd("Cleanup Data");
 
-    /*
     // 输出最终统计结果
     console.log("\n\n#############################################");
     console.log("#            Benchmark Report               #");
@@ -395,43 +403,43 @@ async function runTest() {
     console.log(`Total Items: ${stats1.stats.totalItems}`);
     console.log(`Avg Bucket Size: ${stats1.stats.avgItems}`);
     console.log(
-      `Max Bucket: ${stats1.stats.maxItems} (suffix: ${stats1.outliers.maxBucket.suffix})`,
+      `Max Bucket: ${stats1.stats.maxItems} (suffix: ${stats1.outliers.maxBucket.suffix})`
     );
     console.log(
-      `Min Bucket: ${stats1.stats.minItems} (suffix: ${stats1.outliers.minBucket.suffix})`,
+      `Min Bucket: ${stats1.stats.minItems} (suffix: ${stats1.outliers.minBucket.suffix})`
     );
     console.log(
-      `Skew Ratio: ${(stats1.stats.maxItems / stats1.stats.avgItems).toFixed(2)}`,
+      `Skew Ratio: ${(stats1.stats.maxItems / stats1.stats.avgItems).toFixed(2)}`
     );
 
     console.log(
-      "\n--- 2. After Partial Delete & Rewrite (Delete 500k, Add 123) ---",
+      "\n--- 2. After Partial Delete & Rewrite (Delete 500k, Add 123) ---"
     );
     console.log(`Total Items: ${stats2.stats.totalItems}`);
     console.log(`Avg Bucket Size: ${stats2.stats.avgItems}`);
     console.log(
-      `Max Bucket: ${stats2.stats.maxItems} (suffix: ${stats2.outliers.maxBucket.suffix})`,
+      `Max Bucket: ${stats2.stats.maxItems} (suffix: ${stats2.outliers.maxBucket.suffix})`
     );
     console.log(
-      `Min Bucket: ${stats2.stats.minItems} (suffix: ${stats2.outliers.minBucket.suffix})`,
+      `Min Bucket: ${stats2.stats.minItems} (suffix: ${stats2.outliers.minBucket.suffix})`
     );
     console.log(
-      `Skew Ratio: ${(stats2.stats.maxItems / stats2.stats.avgItems).toFixed(2)}`,
+      `Skew Ratio: ${(stats2.stats.maxItems / stats2.stats.avgItems).toFixed(2)}`
     );
 
     console.log("\n---------------------------------------------");
     console.log("Analysis:");
     const diff = stats2.stats.totalItems - stats1.stats.totalItems;
+    const expected = (WRITE_COUNT/2)*-1 + 123;
     console.log(
-      `Net Change: ${diff} items (Expected: -500,000 + 123 = -499,877)`,
+      `Net Change: ${diff} items (Expected: -${WRITE_COUNT/2} + 123 = ${expected} items)`
     );
-    if (diff === -499877) {
+    if (diff === expected) {  
       console.log("✅ Data consistency verified.");
     } else {
       console.error("❌ Data consistency mismatch!");
     }
     console.log("#############################################\n");
-    */
   } catch (error) {
     console.error("Test failed:", error);
   } finally {
