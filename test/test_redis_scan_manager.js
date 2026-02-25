@@ -362,7 +362,7 @@ async function runTest() {
       hashChars: 2
     });
 
-    const DATA_PREFIX = "scan_test_user:";
+    const DATA_PREFIX = "test_user:";
     const WRITE_COUNT = 10000;
 
     // 3. Write Data
