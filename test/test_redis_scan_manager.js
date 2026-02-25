@@ -263,8 +263,7 @@ async function cleanupData(manager, dataPrefix) {
     const nextStartKey = batchData[batchData.length - 2];
 
     // Delete current batch immediately
-    const cleanupPromises = batchKeysToDelete.map(key => manager.del(key));
-    await Promise.all(cleanupPromises);
+    await manager.del(batchKeysToDelete);
 
     // Update lastKey AFTER deleting, but using the saved key from before deletion
     // Note: Even if we delete the key, lastKey is just a string used for lexicographical comparison in scan
