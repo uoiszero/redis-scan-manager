@@ -284,6 +284,7 @@ var RedisScanManager = class {
     const BATCH_SIZE = 1e3;
     for (let i = 0; i < keysArray.length; i += BATCH_SIZE) {
       const batchKeys = keysArray.slice(i, i + BATCH_SIZE);
+      log(`[Batch Delete] keys in Array: ${keysArray.length}`);
       if (this.isCluster) {
         const pipelines = /* @__PURE__ */ new Map();
         const individualPromises = [];

@@ -358,7 +358,7 @@ export class RedisScanManager {
 
     for (let i = 0; i < keysArray.length; i += BATCH_SIZE) {
       const batchKeys = keysArray.slice(i, i + BATCH_SIZE);
-
+      log(`[Batch Delete] keys in Array: ${keysArray.length}`);
       if (this.isCluster) {
         // Cluster 模式：按节点分组 Pipeline，减少 RTT
         const pipelines = new Map<any, ChainableCommander>();
