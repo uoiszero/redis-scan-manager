@@ -317,53 +317,47 @@ var RedisScanManager = class {
       log(`[Batch Delete] keys in Array: ${keysArray.length}`);
       if (this.isCluster) {
         const pipelines = /* @__PURE__ */ new Map();
-        const individualPromises = [];
-        const getPipeline = (node) => {
-          if (!pipelines.has(node)) {
-            pipelines.set(node, node.pipeline());
+        const getPipelineKey = (node, bucketKey) => {
+          return `${node.options.host}:${node.options.port}:${bucketKey}`;
+        };
+        const getOrCreatePipeline = (node, bucketKey) => {
+          const key = getPipelineKey(node, bucketKey);
+          if (!pipelines.has(key)) {
+            pipelines.set(key, { node, pipeline: node.pipeline() });
           }
-          return pipelines.get(node);
+          return pipelines.get(key).pipeline;
         };
         for (const key of batchKeys) {
           const bucketKey = getBucketKey(key, this.indexPrefix, this.hashChars);
           const keyNode = this._getNode(key);
           const bucketNode = this._getNode(bucketKey);
-          const keyNodeHost = keyNode?.options?.host || "unknown";
-          const bucketNodeHost = bucketNode?.options?.host || "unknown";
           const sameNode = keyNode && bucketNode && keyNode === bucketNode;
-          log(
-            `[Del] Key: ${key}, Bucket: ${bucketKey}, KeyNode: ${keyNodeHost}, BucketNode: ${bucketNodeHost}, SameNode: ${sameNode}`
-          );
-          try {
+          if (sameNode && keyNode) {
+            const pipeline = getOrCreatePipeline(keyNode, bucketKey);
+            pipeline.del(key);
+            pipeline.zrem(bucketKey, key);
+          } else {
             if (keyNode) {
-              getPipeline(keyNode).del(key);
-            } else {
-              individualPromises.push(this.redis.del(key));
+              getOrCreatePipeline(keyNode, key).del(key);
             }
-          } catch (e) {
-            individualPromises.push(this.redis.del(key));
-          }
-          try {
             if (bucketNode) {
-              getPipeline(bucketNode).zrem(bucketKey, key);
-            } else {
-              individualPromises.push(this.redis.zrem(bucketKey, key));
+              getOrCreatePipeline(bucketNode, bucketKey).zrem(bucketKey, key);
             }
-          } catch (e) {
-            individualPromises.push(this.redis.zrem(bucketKey, key));
           }
         }
+        const pipelineCount = pipelines.size;
         log(
-          `[Batch Delete] Keys: ${batchKeys.length}, Nodes (Pipelines): ${pipelines.size}, Individual Requests: ${individualPromises.length}`
+          `[Batch Delete] Keys: ${batchKeys.length}, Pipelines: ${pipelineCount}`
         );
         const execStart = Date.now();
-        await Promise.all([
-          ...Array.from(pipelines.values()).map((p) => p.exec()),
-          ...individualPromises
-        ]);
+        await Promise.all(
+          Array.from(pipelines.values()).map((p) => p.pipeline.exec())
+        );
         const batchDuration = Date.now() - batchStart;
         const execDuration = Date.now() - execStart;
-        console.log(`[Del] Batch delete completed in ${batchDuration}ms (Pipeline exec: ${execDuration}ms)`);
+        console.log(
+          `[Del] Batch delete completed in ${batchDuration}ms (Pipeline exec: ${execDuration}ms, Pipelines: ${pipelineCount})`
+        );
       } else {
         const keysAndBuckets = [];
         for (const key of batchKeys) {
